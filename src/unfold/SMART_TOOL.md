@@ -341,3 +341,27 @@ Read `unfold call --help` for the complete JSON capability index and
 - `unfold revise --help` — Apply a change while retaining the earlier composition.
 - `unfold dashboard --help` — Open a local review workspace.
 - `unfold call --help` — Invoke the JSON capability adapter.
+
+## Optional standard MCP adapter
+
+Install `[mcp]` and configure `unfold-mcp --library /absolute/retained-library` as a
+stdio server. `unfold-mcp --help` describes the transport; no MCP dependency is
+needed for the ordinary library/CLI. `ui://unfold/review` is a portable MCP App
+using the same typed `unfold_*` actions as the model. Media uses bounded standard
+resources, never credential-bearing browser URLs. The review needs serverTools,
+serverResources and updateModelContext support from its host.
+
+Default server mode denies model-backed creation/refinement. For those, install
+`[smart,mcp]`, prepare the renderer, and explicitly enable `--allow-models` with
+provider credentials supplied in the server environment. Grants remain required
+per operation. Use submit-creation for owned asynchronous creation and
+authorize-review plus submit-refinement for bounded follow-up. Exact request_id
+retries never relaunch; closing the view never cancels accepted work. Poll
+review-state and inspect cancellation/interruption rather than replaying work.
+
+One shared view position is retained per library; drafts are revision-bound
+context and grant no authority. The first portable view covers project/revision
+review, retained media playback/download, notes and interval refinements, bounded
+creation and job cancellation. It does not replace every standalone dashboard or
+delivery control. Preview assembly is limited to 32 MiB; use export for larger
+media. No MCP sampling/Tasks or browser credential configuration is provided.

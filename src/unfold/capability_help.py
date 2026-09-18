@@ -2,6 +2,46 @@
 
 # Purpose, example arguments, result, and operation-specific recovery/constraints.
 CAPABILITY_HELP = {
+    "submit-creation": (
+        "Accept one owned asynchronous creation",
+        {
+            "brief": {"title": "A handoff", "intent": "Explain the caller and library"},
+            "grant": {
+                "provider": "openai",
+                "model": "YOUR_VISION_MODEL",
+                "allow_context": True,
+                "allow_frames": True,
+                "vision": True,
+            },
+            "request_id": "0123456789abcdef0123456789abcdef",
+        },
+        "Retained job ID and status; poll review-state for the result.",
+        "Requires a prepared renderer, smart dependencies and explicit bounded disclosure authority. Exact retries never relaunch; changing input under the same request_id fails. Closing a view does not cancel work. Use cancel-job and inspect its terminal state.",
+    ),
+    "cancel-job": (
+        "Request cancellation of owned creation or refinement",
+        {"job_id": "JOB"},
+        "Updated job state.",
+        "A cancellation request is not proof of cleanup. Poll review-state; never automatically replay interrupted jobs.",
+    ),
+    "save-review-view": (
+        "Share a review position without starting work",
+        {"revision_id": "REVISION", "at": 1, "playing": False, "expected_version": 0},
+        "Retained view with a new monotonic version.",
+        "One shared view per library. Optional artifact_id must belong to the revision. Stale expected_version fails; read review-state and deliberately retry. This is presentation state, never permission or creative selection.",
+    ),
+    "media-info": (
+        "Describe intact retained media for bounded transfer",
+        {"artifact_id": "ARTIFACT"},
+        "MIME type, byte size, SHA-256, safe download name and chunk limit.",
+        "Only retained supported media, with no symlinks or paths escaping the library. Missing or changed bytes fail. This never renders or contacts a provider.",
+    ),
+    "read-artifact-chunk": (
+        "Read a bounded verified media chunk",
+        {"artifact_id": "ARTIFACT", "offset": 0},
+        "At most 192 KiB as base64, next_offset, eof and artifact metadata.",
+        "Offset must be within the exact retained artifact. Each call verifies the complete file from the same descriptor used to capture its chunk. No arbitrary local paths or URLs. This integrity-first implementation rereads the whole file for each chunk.",
+    ),
     "sample-output": (
         "Inspect encoded frames without a model",
         {"artifact_id": "ARTIFACT", "times": [1, 3]},
@@ -26,9 +66,10 @@ CAPABILITY_HELP = {
                 "vision": True,
             },
             "refinements": 2,
+            "request_id": "0123456789abcdef0123456789abcdef",
         },
-        "Authority record with remaining allowance and grant snapshot.",
-        "Requires caller authorization. Replaces the allowance with 1–10 refinements; does not add to it or spend it. Grant disclosure and limits apply to each accepted job. Read unfold schemas for Grant fields.",
+        "Retained authorization receipt when request_id is supplied; otherwise the current allowance record.",
+        "Requires caller authorization. Replaces the allowance with 1–10 refinements; does not add to it or spend it. Supply a request_id when retrying across a transport: exact retries return the original receipt without restoring consumed allowance; changed input or an occupied ID fails. Read review-state for the current remaining allowance. Grant disclosure and limits apply to each accepted job. Read unfold schemas for Grant fields.",
     ),
     "review-state": (
         "Resume review and inspect durable job outcomes",

@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Unfold · Motion review</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #121c28;
+        --surface: #ffffff08;
+        --fg: #edf3fa;
+        --muted: #a4b5c8;
+        --accent: #72dfb1;
+        font:
+          14px/1.5 system-ui,
+          sans-serif;
+        color: var(--color-text-primary, var(--fg));
+        background: var(--color-background-primary, var(--bg));
+      }
+      :root[data-theme="light"] {
+        --bg: #f8fafc;
+        --surface: #fff;
+        --fg: #162c3e;
+        --muted: #52677b;
+        --accent: #126649;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 16px;
+      }
+      h1 {
+        font-size: 21px;
+        margin: 0;
+      }
+      h2 {
+        font-size: 17px;
+      }
+      header,
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      header {
+        justify-content: space-between;
+      }
+      button,
+      input,
+      select,
+      textarea {
+        font: inherit;
+        color: inherit;
+        background: var(--surface);
+        border: 1px solid #879db450;
+        border-radius: 8px;
+        padding: 8px 10px;
+      }
+      button {
+        cursor: pointer;
+      }
+      button:hover {
+        border-color: var(--accent);
+      }
+      button:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+      button.primary {
+        background: #2c8865;
+        color: white;
+        border-color: transparent;
+      }
+      label {
+        display: flex;
+        gap: 7px;
+        align-items: center;
+      }
+      textarea {
+        width: 100%;
+        resize: vertical;
+        min-height: 90px;
+      }
+      input[type="number"] {
+        width: 80px;
+      }
+      select {
+        max-width: 100%;
+      }
+      .muted,
+      small {
+        color: var(--color-text-secondary, var(--muted));
+      }
+      .notice {
+        min-height: 39px;
+        white-space: pre-wrap;
+        background: #4ade8010;
+        color: var(--accent);
+        padding: 9px 11px;
+        border-radius: 8px;
+      }
+      .notice.error {
+        color: #d94b59;
+        background: #f8717110;
+      }
+      .panel {
+        padding: 13px;
+        border: 1px solid #879db440;
+        border-radius: 11px;
+        margin: 12px 0;
+      }
+      video,
+      img {
+        display: block;
+        width: 100%;
+        max-height: 420px;
+        background: #07101b;
+        border-radius: 8px;
+      }
+      video[hidden],
+      img[hidden] {
+        display: none;
+      }
+      .toolbar {
+        margin: 10px 0;
+      }
+      #scrub {
+        flex: 1;
+        min-width: 120px;
+        padding: 0;
+      }
+      details {
+        margin: 12px 0;
+      }
+      summary {
+        cursor: pointer;
+      }
+      pre {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        font-size: 12px;
+        max-height: 240px;
+        overflow: auto;
+      }
+      .job {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        justify-content: space-between;
+        border-bottom: 1px solid #879db420;
+        padding: 7px 0;
+      }
+      .job:last-child {
+        border: 0;
+      }
+      a {
+        color: var(--accent);
+      }
+      #new label {
+        margin: 8px 0;
+      }
+      .id {
+        font:
+          11px ui-monospace,
+          monospace;
+        overflow-wrap: anywhere;
+      }
+      .grant {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin: 12px 0;
+      }
+      .grant label {
+        white-space: nowrap;
+      }
+      @media (max-width: 500px) {
+        body {
+          padding: 12px;
+        }
+        .row label {
+          flex: 1;
+        }
+        #projects,
+        #revisions {
+          width: 100%;
+        }
+        .toolbar button {
+          flex: 1;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>Unfold</h1>
+        <small>Motion · context · shared review</small>
+      </div>
+      <button id="refresh">Refresh</button>
+    </header>
+    <p id="notice" class="notice" role="status" aria-live="polite">
+      Connecting to host…
+    </p>
+    <div class="row toolbar">
+      <select id="projects" aria-label="Project"></select
+      ><select id="revisions" aria-label="Viewed revision"></select>
+    </div>
+    <section id="review" hidden>
+      <select id="artifacts" aria-label="Preview artifact"></select>
+      <p id="media-status" class="muted"></p>
+      <video id="video" preload="metadata" playsinline hidden></video
+      ><img id="image" alt="Retained Unfold output" hidden />
+      <div class="row toolbar">
+        <button id="play">Play</button
+        ><input
+          id="scrub"
+          aria-label="Playback position"
+          type="range"
+          min="0"
+          max="60"
+          step="0.05"
+          value="0"
+        /><output id="position">0.00s</output
+        ><a id="download" hidden>Download media</a>
+      </div>
+      <label for="draft">Feedback on the displayed revision</label
+      ><textarea
+        id="draft"
+        placeholder="Drafts are retained without starting work."
+      ></textarea>
+      <div class="row toolbar">
+        <label
+          >From
+          <input
+            id="at"
+            type="number"
+            min="0"
+            max="60"
+            step="0.1"
+            value="0" /></label
+        ><label
+          >To
+          <input
+            id="end"
+            type="number"
+            min="0"
+            max="60"
+            step="0.1"
+            placeholder="Optional"
+        /></label>
+      </div>
+      <div class="row toolbar">
+        <button id="note">Record whole-revision note</button
+        ><button class="primary" id="refine">Refine interval with grant</button>
+      </div>
+      <button id="refine-new" hidden>New refinement</button>
+      <p id="refine-pending" class="muted" hidden></p>
+      <details>
+        <summary>Retained notes, draft, and evidence</summary>
+        <p id="identity" class="id muted"></p>
+        <p id="limits" class="muted"></p>
+        <pre id="details"></pre>
+      </details>
+    </section>
+    <section id="jobs" class="panel" hidden></section>
+    <details id="new">
+      <summary>Create a new motion project</summary>
+      <label
+        >Title
+        <input
+          id="title"
+          maxlength="120"
+          placeholder="Explain an agent handoff" /></label
+      ><textarea
+        id="intent"
+        maxlength="12000"
+        placeholder="What should the audience understand?"
+        aria-label="Communication intent"
+      ></textarea>
+      <div class="row">
+        <label
+          >Duration
+          <input
+            id="duration"
+            type="number"
+            min="5"
+            max="60"
+            value="20" /></label
+        ><label
+          >Identity version
+          <select id="identity-version">
+            <option value="">None</option>
+          </select></label
+        >
+      </div>
+      <p class="muted">
+        Creation uses an explicitly configured provider and prepared renderer.
+        It returns a retained job that can continue while you chat.
+      </p>
+      <button class="primary" id="create">Create with grant</button>
+      <button id="create-new" hidden>New creation</button>
+      <p id="create-pending" class="muted" hidden></p>
+    </details>
+    <details id="grant">
+      <summary>Generation grant · provider, disclosure and limits</summary>
+      <div class="grant">
+        <label
+          >Provider
+          <select id="provider">
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="gemini">Gemini</option>
+          </select></label
+        ><label
+          >Model
+          <input
+            id="model"
+            maxlength="150"
+            placeholder="Vision-capable model ID" /></label
+        ><label
+          ><input id="disclosure" type="checkbox" />Allow supplied context and
+          sampled frames</label
+        >
+      </div>
+      <div class="grant">
+        <label
+          >Model calls
+          <input id="calls" type="number" min="1" max="24" value="12" /></label
+        ><label
+          >Tools
+          <input id="tools" type="number" min="1" max="60" value="30" /></label
+        ><label
+          >Renders
+          <input id="renders" type="number" min="1" max="5" value="3" /></label
+        ><label
+          >Frames
+          <input id="frames" type="number" min="1" max="40" value="16" /></label
+        ><label
+          >Seconds
+          <input id="seconds" type="number" min="30" max="1800" value="900"
+        /></label>
+      </div>
+      <p class="muted">
+        These are per-operation limits, not a dollar cap. Drafts, notes,
+        playback and downloads never generate work. Provider credentials come
+        only from the configured server environment.
+      </p>
+    </details>
+    <details>
+      <summary>Creative library</summary>
+      <pre id="library"></pre>
+    </details>
+    <p class="muted">
+      <small
+        >Closing this view preserves work. Cancel a job explicitly and check its
+        terminal state. Render success does not certify creative quality.</small
+      >
+    </p>
+    <!-- APP_SCRIPT -->
+  </body>
+</html>

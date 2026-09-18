@@ -59,6 +59,15 @@ provider configuration. Read `unfold COMMAND --help` or
 `unfold call CAPABILITY --help` for each capability's arguments, examples, results
 and recovery guidance. `-h` gives a short argument reference.
 
+## Review alongside an MCP conversation
+
+The optional `[mcp]` extra exposes typed standard MCP tools and a portable MCP Apps
+review view. Users and agents share retained revisions, feedback drafts, playback
+position and owned creation/refinement jobs. The view needs no localhost viewer
+URL or end-user Node installation. Start with `unfold-mcp --library /chosen/library`;
+model-backed work additionally requires `[smart,mcp]`, `--allow-models`, a prepared
+renderer and explicit bounded grants. See [MCP setup, coverage and limits](docs/MCP.md).
+
 ## What the loop looks like
 
 1. **Explain.** Tell your agent what the audience knows and what the animation

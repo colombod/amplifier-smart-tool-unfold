@@ -8,26 +8,162 @@ import sys
 import threading
 import time
 
-from .models import Grant, UnfoldError
+from .models import Brief, Grant, UnfoldError
 from .store import uid
 
 
 class Review:
-    def authorize_review(self, project_id, grant, refinements=1):
+    def submit_creation(self, brief, grant, request_id):
+        """Accept one bounded creation and launch owned work; exact retries never relaunch."""
+        brief, grant = Brief.model_validate(brief), Grant.model_validate(grant)
+        self.store.workspace(request_id)
+        payload = {"brief": brief.model_dump(), "grant": grant.model_dump()}
+        fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        with self.store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                old = self.store.get(request_id, db=db)
+            except UnfoldError:
+                old = None
+            if old:
+                if (
+                    old.get("kind") != "review_job"
+                    or old.get("mode") != "create"
+                    or old.get("fingerprint") != fingerprint
+                ):
+                    raise UnfoldError(
+                        "REQUEST_CONFLICT", "Retry identity has different creation input."
+                    )
+                return old
+            if not (grant.allow_context and grant.allow_frames and grant.vision):
+                raise UnfoldError(
+                    "DISCLOSURE_REQUIRED",
+                    "Creation requires context and sampled-frame disclosure to a vision model.",
+                )
+            self.backend.require()
+            job = {
+                "id": request_id,
+                "kind": "review_job",
+                "mode": "create",
+                **payload,
+                "fingerprint": fingerprint,
+                "project_id": None,
+                "revision_id": None,
+                "operation_id": uid(),
+                "status": "queued",
+                "created": time.time(),
+            }
+            self.store.put("review_job", job, db)
+            self.store.event(
+                "creation_accepted", request_id, {"operation_id": job["operation_id"]}, db
+            )
+        return self._launch_review_job(request_id)
+
+    def cancel_job(self, job_id):
+        """Request cancellation of owned creation or refinement; inspect review_state for cleanup."""
+        return self.cancel_refinement(job_id)
+
+    def save_review_view(
+        self, revision_id, at=0, playing=False, artifact_id=None, expected_version=None
+    ):
+        """Persist the shared review position; changing it never selects creative work or grants execution."""
+        import math
+
+        revision = self.store.get(revision_id, "revision")
+        if artifact_id is not None and artifact_id not in revision.get("artifacts", []):
+            raise UnfoldError("INVALID_INPUT", "The media must belong to the viewed revision.")
+        duration = revision.get("brief", {}).get("duration", 60)
+        if (
+            type(at) not in (int, float)
+            or not math.isfinite(at)
+            or not 0 <= at <= duration
+            or type(playing) is not bool
+        ):
+            raise UnfoldError(
+                "INVALID_INPUT", "Choose a finite playback position within the revision."
+            )
+        if expected_version is not None and (
+            type(expected_version) is not int or expected_version < 0
+        ):
+            raise UnfoldError(
+                "INVALID_INPUT", "Expected view version must be a nonnegative integer."
+            )
+        with self.store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                old = self.store.get("shared-review-view", "review_view", db)
+            except UnfoldError:
+                old = {"version": 0}
+            if expected_version is not None and expected_version != old["version"]:
+                raise UnfoldError(
+                    "VIEW_CONFLICT", "The shared review position changed. Read review-state."
+                )
+            record = {
+                "id": "shared-review-view",
+                "kind": "review_view",
+                "revision_id": revision_id,
+                "project_id": revision["project_id"],
+                "at": at,
+                "playing": playing,
+                "artifact_id": artifact_id,
+                "version": old["version"] + 1,
+                "updated_at": time.time(),
+            }
+            self.store.put("review_view", record, db)
+        return record
+
+    def authorize_review(self, project_id, grant, refinements=1, request_id=None):
+        """Set a bounded allowance; optional retry identity never restores consumed authority."""
         self.store.get(project_id, "project")
         grant = Grant.model_validate(grant)
-        if not 1 <= refinements <= 10:
+        if type(refinements) is not int or not 1 <= refinements <= 10:
             raise UnfoldError("INVALID_INPUT", "Authorize 1–10 bounded refinements.")
-        record = {
-            "id": project_id + "-authority",
-            "kind": "authority",
+        payload = {
             "project_id": project_id,
             "grant": grant.model_dump(),
-            "remaining": refinements,
+            "refinements": refinements,
         }
-        self.store.put("authority", record)
-        self.store.event("review_authorized", project_id, {"remaining": refinements})
-        return record
+        fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        if request_id is not None:
+            self.store.workspace(request_id)
+        with self.store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if request_id is not None:
+                try:
+                    old = self.store.get(request_id, db=db)
+                except UnfoldError:
+                    old = None
+                if old:
+                    if (
+                        old.get("kind") != "review_authorization"
+                        or old.get("fingerprint") != fingerprint
+                    ):
+                        raise UnfoldError(
+                            "REQUEST_CONFLICT",
+                            "Retry identity has different authorization input or is already occupied.",
+                        )
+                    return old
+            record = {
+                "id": project_id + "-authority",
+                "kind": "authority",
+                "project_id": project_id,
+                "grant": grant.model_dump(),
+                "remaining": refinements,
+            }
+            self.store.put("authority", record, db)
+            self.store.event("review_authorized", project_id, {"remaining": refinements}, db)
+            if request_id is None:
+                return record
+            receipt = {
+                "id": request_id,
+                "kind": "review_authorization",
+                **payload,
+                "fingerprint": fingerprint,
+                "authority_id": record["id"],
+                "created": time.time(),
+            }
+            self.store.put("review_authorization", receipt, db)
+            return receipt
 
     def save_draft(self, revision_id, text, at=0, end=None, sequence=0):
         revision = self.store.get(revision_id, "revision")
@@ -82,11 +218,11 @@ class Review:
         with self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
-                old = self.store.get(request_id, "review_job", db)
+                old = self.store.get(request_id, db=db)
             except UnfoldError:
                 old = None
             if old:
-                if old["fingerprint"] != fingerprint:
+                if old.get("kind") != "review_job" or old.get("fingerprint") != fingerprint:
                     raise UnfoldError("REQUEST_CONFLICT", "Retry identity has different feedback.")
                 return old
             project = self.store.get(rev["project_id"], "project", db)
@@ -146,6 +282,10 @@ class Review:
             self.store.event(
                 "refinement_accepted", request_id, {"feedback_id": note["id"], **payload}, db
             )
+        return self._launch_review_job(request_id)
+
+    def _launch_review_job(self, request_id):
+        job = self.store.get(request_id, "review_job")
         try:
             logpath = self.store.workspace(request_id) / "review.log"
             with logpath.open("w") as log:
@@ -171,7 +311,7 @@ class Review:
         except OSError:
             job.update(
                 status="failed",
-                error="Could not start refinement. Allowance was consumed; explicit authorization is needed to retry.",
+                error="Could not start owned work. This request will not be replayed; explicit authorization is needed for a new attempt.",
             )
             self.store.put("review_job", job)
         return job
@@ -185,22 +325,37 @@ class Review:
             job.update(status="running", pid=os.getpid())
             self.store.put("review_job", job, db)
         try:
-            result = self.revise(
-                job["revision_id"],
-                job["text"],
-                Grant.model_validate(job["grant"]),
-                request_id=job["operation_id"],
-                target={"at": job["at"], "end": job["end"]},
-                identity_version=job.get("identity_version"),
-            )
-            if result["status"] == "completed":
+            if job.get("mode") == "create":
+                result = self.create(
+                    Brief.model_validate(job["brief"]),
+                    Grant.model_validate(job["grant"]),
+                    request_id=job["operation_id"],
+                )
+            else:
+                result = self.revise(
+                    job["revision_id"],
+                    job["text"],
+                    Grant.model_validate(job["grant"]),
+                    request_id=job["operation_id"],
+                    target={"at": job["at"], "end": job["end"]},
+                    identity_version=job.get("identity_version"),
+                )
+            if result["status"] == "completed" and job.get("feedback_id"):
                 self.address_feedback(job["feedback_id"], result["revision_id"])
             with self.store.connect() as db:
                 db.execute("BEGIN IMMEDIATE")
                 current = self.store.get(job_id, "review_job", db)
                 current.update(status=result["status"], result=result)
+                if job.get("mode") == "create" and result.get("project_id"):
+                    current["project_id"] = result["project_id"]
                 self.store.put("review_job", current, db)
-                self.store.event("refinement_" + result["status"], job_id, result, db)
+                self.store.event(
+                    ("creation_" if job.get("mode") == "create" else "refinement_")
+                    + result["status"],
+                    job_id,
+                    result,
+                    db,
+                )
                 return current
         except Exception as exc:
             job.update(
@@ -210,7 +365,11 @@ class Review:
                 error=str(exc),
             )
             self.store.put("review_job", job)
-            self.store.event("refinement_failed", job_id, {"error": str(exc)})
+            self.store.event(
+                "creation_failed" if job.get("mode") == "create" else "refinement_failed",
+                job_id,
+                {"error": str(exc)},
+            )
             return job
 
     def cancel_refinement(self, job_id):
@@ -250,7 +409,8 @@ class Review:
             except UnfoldError:
                 operation = None
             if operation and operation["status"] == "completed":
-                self.address_feedback(job["feedback_id"], operation["revision_id"])
+                if job.get("feedback_id"):
+                    self.address_feedback(job["feedback_id"], operation["revision_id"])
                 job.update(status="completed", result=operation)
             else:
                 if operation:
@@ -274,6 +434,7 @@ class Review:
             "events": self.observe(),
             "jobs": self.store.list("review_job"),
             "drafts": self.store.list("draft"),
+            "views": self.store.list("review_view"),
             "authorities": self.store.list("authority"),
             "assets": self.assets(),
             "packs": self.packs(),

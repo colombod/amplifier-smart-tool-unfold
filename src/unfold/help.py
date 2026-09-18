@@ -26,7 +26,7 @@ def manifest():
             "revise": "model-backed",
             **{
                 name: "model-backed"
-                if name in {"submit-refinement", "adopt-identity"}
+                if name in {"submit-refinement", "submit-creation", "adopt-identity"}
                 else "deterministic"
                 for name in CAPABILITIES
             },
@@ -82,7 +82,13 @@ def capability_skill(name, *, json_adapter=False, argument_reference=""):
     catalog = CAPABILITY_HELP if json_adapter else COMMAND_HELP
     purpose, example, result, guidance = catalog[name]
     command = f"call {name}" if json_adapter else name
-    model_backed = name in {"create", "revise", "submit-refinement", "adopt-identity"}
+    model_backed = name in {
+        "create",
+        "revise",
+        "submit-refinement",
+        "submit-creation",
+        "adopt-identity",
+    }
     if json_adapter:
         arguments = f"Named JSON parameters: `{signature(getattr(Unfold, CAPABILITIES[name]))}`"
         example = f"unfold call {name} --args - <<'JSON'\n{json.dumps(example, indent=2)}\nJSON"

@@ -24,6 +24,111 @@ class Unfold(Review, Assets, Delivery):
         self.store = Store(library or Path.home() / ".local/share/unfold")
         self.backend = Backend(backend or Path.home() / ".local/share/unfold-backend")
 
+    def _read_media(self, artifact_id, offset=None):
+        """Hash and capture from one scoped descriptor, never a reopened path."""
+        import stat
+
+        artifact = self.store.get(artifact_id, "artifact")
+        relative = Path(artifact["relative_path"])
+        if relative.is_absolute() or any(part in ("..", ".") for part in relative.parts):
+            raise UnfoldError("MATERIAL_CHANGED", "Retained media is outside its library.")
+        mime = {
+            "mp4": "video/mp4",
+            "webm": "video/webm",
+            "mov": "video/quicktime",
+            "png": "image/png",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "wav": "audio/wav",
+            "mp3": "audio/mpeg",
+        }.get(artifact.get("format", "mp4"))
+        if mime is None:
+            raise UnfoldError(
+                "UNSUPPORTED", "This artifact format is not supported for media transfer."
+            )
+        descriptors = []
+        try:
+            # Refuse symlinks in every component. A replacement path cannot redirect a
+            # descriptor already opened under the retained store, including mid-read.
+            descriptors.append(
+                os.open(self.store.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            )
+            for part in relative.parts[:-1]:
+                descriptors.append(
+                    os.open(
+                        part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptors[-1]
+                    )
+                )
+            fd = os.open(
+                relative.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=descriptors[-1]
+            )
+            with os.fdopen(fd, "rb") as stream:
+                before = os.fstat(stream.fileno())
+                if not stat.S_ISREG(before.st_mode):
+                    raise UnfoldError("MATERIAL_CHANGED", "Retained media must be a regular file.")
+                if offset is not None and (
+                    type(offset) is not int or not 0 <= offset <= before.st_size
+                ):
+                    raise UnfoldError(
+                        "INVALID_INPUT", "Offset must be within the retained artifact."
+                    )
+                checksum, captured, position = hashlib.sha256(), bytearray(), 0
+                while block := stream.read(1024 * 1024):
+                    checksum.update(block)
+                    if offset is not None:
+                        start, end = (
+                            max(offset - position, 0),
+                            min(offset + 196608 - position, len(block)),
+                        )
+                        if start < end:
+                            captured.extend(block[start:end])
+                    position += len(block)
+                after = os.fstat(stream.fileno())
+                if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                    after.st_size,
+                    after.st_mtime_ns,
+                    after.st_ctime_ns,
+                ) or checksum.hexdigest() != artifact["sha256"]:
+                    raise UnfoldError(
+                        "MATERIAL_CHANGED", "Retained media changed; no bytes were transferred."
+                    )
+            info = {
+                "artifact_id": artifact_id,
+                "revision_id": artifact["revision_id"],
+                "mime_type": mime,
+                "size": before.st_size,
+                "sha256": artifact["sha256"],
+                "name": re.sub(r"[^\w .-]", "_", artifact["name"]).strip(". ")
+                + "."
+                + artifact.get("format", "mp4"),
+                "chunk_bytes": 196608,
+            }
+            return info, bytes(captured)
+        except OSError as error:
+            raise UnfoldError(
+                "MATERIAL_CHANGED", "Retained media is missing, changed, or uses a symlink."
+            ) from error
+        finally:
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
+
+    def media_info(self, artifact_id):
+        """Describe intact retained media without granting filesystem access."""
+        return self._read_media(artifact_id)[0]
+
+    def read_artifact_chunk(self, artifact_id, offset=0):
+        """Read at most 192 KiB from one verified media snapshot; no path/URL inputs."""
+        import base64
+
+        info, data = self._read_media(artifact_id, offset)
+        return {
+            **info,
+            "offset": offset,
+            "next_offset": offset + len(data),
+            "eof": offset + len(data) >= info["size"],
+            "data": base64.b64encode(data).decode("ascii"),
+        }
+
     def sample_output(self, artifact_id, times):
         import math
 

@@ -61,6 +61,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+mcp = [
+    { name = "mcp" },
+]
 smart = [
     { name = "amplifier-agent" },
     { name = "anthropic" },
@@ -79,11 +82,12 @@ requires-dist = [
     { name = "amplifier-agent", marker = "extra == 'smart'", git = "https://github.com/microsoft/amplifier-agent?rev=v0.17.0" },
     { name = "anthropic", marker = "extra == 'smart'", specifier = ">=0.70" },
     { name = "google-genai", marker = "extra == 'smart'", specifier = ">=1" },
+    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.2,<3" },
     { name = "openai", marker = "extra == 'smart'", specifier = ">=1" },
     { name = "pillow", specifier = ">=11,<13" },
     { name = "pydantic", specifier = ">=2.10,<3" },
 ]
-provides-extras = ["smart"]
+provides-extras = ["mcp", "smart"]
 
 [package.metadata.requires-dev]
 dev = [

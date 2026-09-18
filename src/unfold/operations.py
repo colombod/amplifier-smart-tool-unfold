@@ -2,6 +2,11 @@
 
 # An explicit allowlist, never arbitrary getattr from untrusted UI input.
 CAPABILITIES = {
+    "submit-creation": "submit_creation",
+    "cancel-job": "cancel_job",
+    "save-review-view": "save_review_view",
+    "media-info": "media_info",
+    "read-artifact-chunk": "read_artifact_chunk",
     "sample-output": "sample_output",
     "update-asset": "update_asset",
     "authorize-review": "authorize_review",

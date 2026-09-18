@@ -100,3 +100,31 @@ Conformance does not establish creative quality or replace product tests.
   reference. Update capability help with behavior changes, and keep examples
   consistent with the public library. Help must work without credentials, model
   initialization, or creation of a library directory.
+
+## Optional MCP adapter verification
+
+```sh
+uv sync --extra mcp
+npm ci --prefix mcp-app
+npm run build --prefix mcp-app
+uv run ruff check src tests
+uv run pytest -q
+# Optional real-browser check (Chromium installation is explicit):
+uv pip install --python .venv/bin/python playwright
+.venv/bin/python -m playwright install chromium
+.venv/bin/python -m pytest -q tests/test_mcp_browser.py
+# Deterministic retained playback fixture, never a creative-quality claim:
+.venv/bin/python tests/mcp_fixtures.py /temporary/retained-library
+```
+
+The adapter tests exercise the official SDK, actual stdio reopen, typed grants,
+model permission gates, exact retry/cancellation recovery, shared drafts/views,
+scoped byte integrity, and symlink/path replacement boundaries without paid model
+calls. The independent browser fixture uses the official AppBridge, verifies real
+decoded MP4 playback/seek, user/agent shared state, quiet polling, durable reopen,
+and a visible unsupported-host error. Native renderer tests additionally require
+`UNFOLD_TEST_BACKEND` as documented in `AGENTS.md`. Regenerate the bundled resource
+and bundled dependency license notice after changing `mcp-app/`; Node is a build
+dependency only. `npm ci` reproduces the SDK bundle pinned in package-lock.json.
+Media navigation regressions must cover failed loads after a valid preview: old
+video/image sources and download links must not remain under the new revision.
