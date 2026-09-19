@@ -57,6 +57,15 @@ Translation x/y moves the whole shape rigidly; it does not change its local poin
 SVG/CSS screen y increases downward. A mathematical upward vector needs decreasing y.
 Keep arrowheads inset from SVG bounds. Use thin, dim grid lines behind bright vectors.
 
+A tween can carry `points` to morph a path's outline in place, interpolating every
+point toward a new local list over the tween's duration. It requires exactly the
+same number of points as the element declares, so plan both the starting and
+ending point lists together; a mismatched count is rejected rather than guessed at.
+This is the alternative to fading one shape out while fading another in, which
+leaves the frame empty in between. It does not work on a path with `arrow_end`,
+since the arrowhead is computed once from the final two authored points and would
+point at stale geometry after a morph.
+
 For circular connections, `kind:"arc"` uses the inscribed circle of width/height,
 `start_angle` in degrees (0 right, 90 down, 180 left, -90 up) and positive
 `sweep_angle` less than 360 clockwise. It supports draw, stroke and opacity, but

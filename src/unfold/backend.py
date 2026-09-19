@@ -165,9 +165,25 @@ class Backend:
             )
         lines = []
         for tween in scene.tweens:
-            props = tween.model_dump(exclude_none=True, exclude={"target", "at", "draw"})
-            if tween.draw is None or set(props) - {"duration", "ease"}:
+            props = tween.model_dump(exclude_none=True, exclude={"target", "at", "draw", "points"})
+            if (tween.draw is None and tween.points is None) or set(props) - {"duration", "ease"}:
                 lines.append(f'tl.to("#{tween.target}",{json.dumps(props)},{tween.at});')
+            if tween.points is not None:
+                element = next(e for e in scene.elements if e.id == tween.target)
+                frm = json.dumps([list(point) for point in element.points])
+                to = json.dumps([list(point) for point in tween.points])
+                closing = json.dumps(" Z" if element.closed else "")
+                lines.append(
+                    "(function(){var a=" + frm + ",b=" + to + ",z=" + closing + ","
+                    'e=document.querySelector("#' + tween.target + ' .trace"),p={t:0};'
+                    "tl.to(p,{t:1,duration:" + json.dumps(tween.duration) + ",ease:"
+                    + json.dumps(tween.ease) + ','
+                    'onUpdate:function(){var s="M ",i;'
+                    "for(i=0;i<a.length;i++){s+=(a[i][0]+(b[i][0]-a[i][0])*p.t)+\" \"+"
+                    "(a[i][1]+(b[i][1]-a[i][1])*p.t)+(i<a.length-1?\" L \":\"\");}"
+                    'e.setAttribute("d",s+z);'
+                    "}}," + json.dumps(tween.at) + ");})();"
+                )
             if tween.draw is not None:
                 trace = {
                     "strokeDashoffset": 1 - tween.draw,
