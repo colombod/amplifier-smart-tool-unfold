@@ -195,23 +195,13 @@ class Unfold(Review, Assets, Delivery):
             raise UnfoldError(
                 "UNSUPPORTED", "This artifact format is not supported for media transfer."
             )
-        descriptors = []
         try:
-            # Refuse symlinks in every component. A replacement path cannot redirect a
-            # descriptor already opened under the retained store, including mid-read.
-            descriptors.append(
-                os.open(self.store.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            )
-            for part in relative.parts[:-1]:
-                descriptors.append(
-                    os.open(
-                        part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptors[-1]
-                    )
-                )
-            fd = os.open(
-                relative.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=descriptors[-1]
-            )
-            with os.fdopen(fd, "rb") as stream:
+            with (
+                self.store.open_relative(
+                    relative, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                ) as fd,
+                os.fdopen(fd, "rb", closefd=False) as stream,
+            ):
                 before = os.fstat(stream.fileno())
                 if not stat.S_ISREG(before.st_mode):
                     raise UnfoldError("MATERIAL_CHANGED", "Retained media must be a regular file.")
@@ -257,9 +247,6 @@ class Unfold(Review, Assets, Delivery):
             raise UnfoldError(
                 "MATERIAL_CHANGED", "Retained media is missing, changed, or uses a symlink."
             ) from error
-        finally:
-            for descriptor in reversed(descriptors):
-                os.close(descriptor)
 
     def media_info(self, artifact_id):
         """Describe intact retained media without granting filesystem access."""

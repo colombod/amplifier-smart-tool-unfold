@@ -29,10 +29,22 @@ def write_json(path, data):
     temporary.replace(path)
 
 
+def read_at(descriptor, size, offset):
+    """Read from an offset on a descriptor owned by this operation."""
+    if hasattr(os, "pread"):
+        return os.pread(descriptor, size, offset)
+    os.lseek(descriptor, offset, os.SEEK_SET)
+    return os.read(descriptor, size)
+
+
 def write_all(descriptor, data, offset=None):
     """Write every byte or fail loudly; ``os.write`` may legally short-write."""
     view = memoryview(data)
     position = 0
+    if offset is not None and not hasattr(os, "pwrite"):
+        # Each upload owns its descriptor under the store transaction.
+        os.lseek(descriptor, offset, os.SEEK_SET)
+        offset = None
     while position < len(view):
         written = (
             os.pwrite(descriptor, view[position:], offset + position)
@@ -139,6 +151,17 @@ class Store:
             or any(part in ("", ".", "..") for part in relative.parts)
         ):
             raise UnfoldError("INVALID_INPUT", "Library path must be a confined relative path.")
+        if os.name == "nt":
+            from .windows_files import open_file
+
+            try:
+                with open_file(self.root, relative, flags) as descriptor:
+                    yield descriptor
+            except OSError as error:
+                raise UnfoldError(
+                    "MATERIAL_CHANGED", "Library material is missing, changed, or uses a symlink."
+                ) from error
+            return
         descriptors = []
         try:
             descriptors.append(os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW))
@@ -170,7 +193,7 @@ class Store:
 
     def secure_stat(self, relative):
         """Return a regular-file stat through ``open_relative`` without path following."""
-        with self.open_relative(relative, os.O_RDONLY | os.O_NONBLOCK) as fd:
+        with self.open_relative(relative, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)) as fd:
             value = os.fstat(fd)
         if not stat.S_ISREG(value.st_mode):
             raise UnfoldError("MATERIAL_CHANGED", "Library material must be a regular file.")
@@ -185,6 +208,9 @@ class Store:
             or any(part in ("", ".", "..") for part in relative.parts)
         ):
             raise UnfoldError("INVALID_INPUT", "Library path must be a confined relative path.")
+        if os.name == "nt":
+            self._unlink_windows(relative)
+            return
         descriptors = []
         try:
             descriptors.append(os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW))
@@ -222,6 +248,8 @@ class Store:
             or any(part in ("", ".", "..") for part in relative.parts)
         ):
             raise UnfoldError("INVALID_INPUT", "Library path must be a confined relative path.")
+        if os.name == "nt":
+            return self._unlink_windows(relative, expected_sha256)
         descriptors = []
         try:
             descriptors.append(os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW))
@@ -240,7 +268,7 @@ class Store:
             try:
                 file_descriptor = os.open(
                     relative.name,
-                    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                    os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0),
                     dir_fd=descriptors[-1],
                 )
             except FileNotFoundError:
@@ -313,6 +341,29 @@ class Store:
         finally:
             for descriptor in reversed(descriptors):
                 os.close(descriptor)
+
+    def _unlink_windows(self, relative, expected_sha256=None):
+        from .windows_files import delete_open_file, open_file
+
+        try:
+            with open_file(self.root, relative, os.O_RDONLY, delete=True) as descriptor:
+                if expected_sha256 is not None:
+                    checksum = hashlib.sha256()
+                    while block := os.read(descriptor, 1024 * 1024):
+                        checksum.update(block)
+                    if checksum.hexdigest() != expected_sha256:
+                        raise UnfoldError(
+                            "MATERIAL_CHANGED",
+                            "Managed material changed; removal was not performed.",
+                        )
+                delete_open_file(descriptor)
+            return True
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            raise UnfoldError(
+                "MATERIAL_CHANGED", "Library material is missing, changed, or uses a symlink."
+            ) from error
 
 
 @contextmanager

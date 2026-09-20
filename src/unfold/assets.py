@@ -169,7 +169,9 @@ class Assets:
                             "Upload promotion identity is already bound to different material.",
                         )
                     return existing
-                with self.store.open_relative(relative_path, os.O_RDONLY | os.O_NONBLOCK) as source:
+                with self.store.open_relative(
+                    relative_path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                ) as source:
                     before = os.fstat(source)
                     if not stat.S_ISREG(before.st_mode) or (before.st_dev, before.st_ino) != (
                         expected_device,
@@ -603,7 +605,7 @@ class Assets:
                             os.fsync(destination)
                         created.append((identity, relative))
                         with self.store.open_relative(
-                            relative, os.O_RDONLY | os.O_NONBLOCK
+                            relative, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
                         ) as source:
                             copied = hashlib.file_digest(
                                 os.fdopen(os.dup(source), "rb"), "sha256"

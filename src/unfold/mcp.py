@@ -22,7 +22,7 @@ from typing import Annotated, Literal
 from .assets import MAX_PACK
 from .lib import Unfold
 from .models import Brief, Grant, UnfoldError
-from .store import uid, write_all
+from .store import read_at, uid, write_all
 
 UI_URI = "ui://unfold/review"
 UPLOAD_TTL_SECONDS = 15 * 60
@@ -363,7 +363,9 @@ def create_server(library, *, allow_models=False):
         relative = Path("operations") / item["id"] / "inspected-pack.zip"
         expected = item["sha256"]
         try:
-            with library.store.open_relative(relative, os.O_RDONLY | os.O_NONBLOCK) as fd:
+            with library.store.open_relative(
+                relative, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+            ) as fd:
                 before = os.fstat(fd)
                 if not stat.S_ISREG(before.st_mode) or hash_descriptor(fd) != expected:
                     raise UnfoldError("MATERIAL_CHANGED", "Inspected ZIP snapshot changed.")
@@ -379,7 +381,7 @@ def create_server(library, *, allow_models=False):
             except UnfoldError:
                 pass
         with library.store.open_relative(
-            item["relative_path"], os.O_RDONLY | os.O_NONBLOCK
+            item["relative_path"], os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
         ) as source:
             before = checked_upload_descriptor(item, source)
             if hash_descriptor(source) != expected:
@@ -413,7 +415,9 @@ def create_server(library, *, allow_models=False):
     def opened_pack_snapshot(item):
         relative = Path(item["snapshot_relative"])
         with owned_reader(relative):
-            with library.store.open_relative(relative, os.O_RDONLY | os.O_NONBLOCK) as fd:
+            with library.store.open_relative(
+                relative, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+            ) as fd:
                 observed = os.fstat(fd)
                 if not stat.S_ISREG(observed.st_mode) or file_identity(observed) != tuple(
                     item["snapshot_identity"]
@@ -501,16 +505,14 @@ def create_server(library, *, allow_models=False):
         if current is not None:
             try:
                 with library.store.open_relative(
-                    current["relative_path"], os.O_RDONLY | os.O_NONBLOCK
+                    current["relative_path"], os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
                 ) as fd:
                     details = os.fstat(fd)
                     if (
                         not stat.S_ISREG(details.st_mode)
                         or file_identity(details) != current["identity"]
                     ):
-                        raise UnfoldError(
-                            "MATERIAL_CHANGED", "Retained transfer snapshot changed."
-                        )
+                        raise UnfoldError("MATERIAL_CHANGED", "Retained transfer snapshot changed.")
                 current["expires"] = now + TRANSFER_TTL_SECONDS
                 return {
                     field: current[field]
@@ -520,7 +522,9 @@ def create_server(library, *, allow_models=False):
                 snapshots.pop(key, None)
                 discard_snapshot(current)
         relative, expected, mime, name = transfer_record(identity, kind, index)
-        with library.store.open_relative(relative, os.O_RDONLY | os.O_NONBLOCK) as fd:
+        with library.store.open_relative(
+            relative, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+        ) as fd:
             before = os.fstat(fd)
             if not stat.S_ISREG(before.st_mode):
                 raise UnfoldError("MATERIAL_CHANGED", "Retained item must be a regular file.")
@@ -598,7 +602,7 @@ def create_server(library, *, allow_models=False):
             raise UnfoldError("INVALID_INPUT", "Use a byte offset within the retained item.")
         with owned_reader(current["relative_path"]):
             with library.store.open_relative(
-                current["relative_path"], os.O_RDONLY | os.O_NONBLOCK
+                current["relative_path"], os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
             ) as fd:
                 observed = os.fstat(fd)
                 identity_now = (
@@ -614,7 +618,7 @@ def create_server(library, *, allow_models=False):
                     raise UnfoldError(
                         "MATERIAL_CHANGED", "Retained item changed; no bytes were transferred."
                     )
-                data = os.pread(fd, min(196608, current["size"] - offset), offset)
+                data = read_at(fd, min(196608, current["size"] - offset), offset)
         return info, data
 
     def unfold_transfer_info(
@@ -752,7 +756,7 @@ def create_server(library, *, allow_models=False):
             if offset + len(raw) > item["size"]:
                 raise UnfoldError("INVALID_INPUT", "Upload chunk is outside its declared bounds.")
             with library.store.open_relative(
-                item["relative_path"], os.O_RDWR | os.O_NONBLOCK
+                item["relative_path"], os.O_RDWR | getattr(os, "O_NONBLOCK", 0)
             ) as descriptor:
                 current = os.fstat(descriptor)
                 if (
@@ -762,17 +766,19 @@ def create_server(library, *, allow_models=False):
                 ):
                     raise UnfoldError("MATERIAL_CHANGED", "Upload staging changed; start again.")
                 if offset < item["next_offset"]:
-                    if os.pread(descriptor, len(raw), offset) != raw:
+                    if read_at(descriptor, len(raw), offset) != raw:
                         raise UnfoldError(
                             "UPLOAD_CONFLICT", "Retry bytes differ from the accepted upload."
                         )
                     return {"id": upload_id, "next_offset": item["next_offset"]}
                 if offset != item["next_offset"]:
                     raise UnfoldError("UPLOAD_CONFLICT", "Upload chunks must arrive in order.")
-                if os.pwrite(descriptor, raw, offset) != len(raw):
+                try:
+                    write_all(descriptor, raw, offset)
+                except OSError as error:
                     raise UnfoldError(
                         "UPLOAD_INCOMPLETE", "Could not write the complete upload chunk."
-                    )
+                    ) from error
                 os.fsync(descriptor)
                 if os.fstat(descriptor).st_size != offset + len(raw):
                     raise UnfoldError("MATERIAL_CHANGED", "Upload staging changed during write.")
@@ -794,7 +800,7 @@ def create_server(library, *, allow_models=False):
                 if item["next_offset"] != item["size"]:
                     raise UnfoldError("UPLOAD_INCOMPLETE", "Upload is incomplete.")
                 with library.store.open_relative(
-                    item["relative_path"], os.O_RDONLY | os.O_NONBLOCK
+                    item["relative_path"], os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
                 ) as fd:
                     before = checked_upload_descriptor(item, fd)
                     checksum = hash_descriptor(fd)
