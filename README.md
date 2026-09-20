@@ -1,5 +1,7 @@
 # Unfold
 
+[Website source and preview instructions](site/README.md)
+
 **Make an idea clear through motion.**
 
 ![Unfold’s review dashboard showing From spark to system: luminous orbital geometry and the closing Make ideas move title.](docs/images/unfold-studio.png)
