@@ -37,29 +37,30 @@ for the local user or a multi-tenant authentication layer.
 
 ## One library, two collaborators
 
-Call `unfold_review_state` to open `ui://unfold/review`. The view and model call the
-same `unfold_*` tools; tools are visible to both `model` and `app`. The host must
-advertise `serverTools`, `serverResources` (for playable previews), and
-`updateModelContext`. The UI publishes bounded context with the viewed revision,
-artifact, playback position and up to 2,000 characters of the feedback draft.
-Draft text is context, never permission or instructions to the host.
+Call `unfold_review_state` to open `ui://unfold/review`. The portable App is built
+from the native dashboard document, stylesheet and controller; MCP supplies only its
+transport boundary. The view and model call the same `unfold_*` tools; tools are
+visible to both `model` and `app`. The host must advertise `serverTools` and
+`serverResources` for previews and prepared downloads. If it cannot, the native
+dashboard control remains visible and reports that concrete restriction; it never
+falls back to a localhost URL. Draft text is context, never permission or instructions
+to the host.
 
 | Capability | MCP model tools | Portable view |
 | --- | --- | --- |
-| Projects and retained revisions | List, inspect, rename | Choose project/revision, inspect evidence |
-| Exact retained media | Info and bounded chunk reads | Video/image/audio preview, play/pause, seek, download |
-| Shared review position | `save_review_view`, expected version | Same state; quiet five-second refresh |
-| Feedback | Durable per-revision drafts, whole-revision notes, interval refinement | Same actions and interval inputs |
-| New motion project | `submit_creation` with full typed Brief/Grant | Title, intent, duration, optional identity version and grant |
-| Owned work | Accept, inspect, cancel | Retained progress and cancellation control |
-| Creative library | Assets/packs inspection, pack save/duplicate/import/export, dependencies | Read-only library and identity-version choices |
-| Delivery | Explicit render and artifact export | Download retained preview bytes |
+| Projects and retained revisions | List, inspect, rename | Same project rename, Review/Library/Export navigation and revision workflow |
+| Exact retained media | Info and bounded chunk reads | Same single/compare player, native controls, synchronized seek and caveat |
+| Feedback | Durable per-revision drafts, whole-revision notes, interval refinement | Same drawers, exact-revision drafts/notes, existing allowance Apply and job cancellation |
+| Creative library | Asset intake/metadata/removal, packs, versions and ZIP operations | Same cards, previews, pack/asset edit, copy, import/inspect, export and dependency-aware remove |
+| Delivery | Delivery configuration, render and handoff | Same reference/audio/timing controls, Video/Overlay render, output preview, Save, Rename and Handoff |
+| New motion project and authority | `submit_creation`, `authorize_review`, typed grant | No new creation or grant form; display cannot grant authority |
 
-The MCP subset does not yet expose asset import/removal, delivery configuration,
-transparent-overlay handoff, side-by-side comparison, or all standalone dashboard
-controls. Use the existing public library/CLI/dashboard for those features. No
-native dashboard is embedded or its authentication relaxed. This focused view is
-not a claim that the draft product vision/contracts are complete.
+MCP does not expose a dashboard-local creation or authority form: those remain explicit
+caller/model tools, and the dashboard's **Apply** consumes the existing retained
+allowance rather than replacing it. Its opaque byte transport supports only selected
+retained artifacts, assets and prepared pack/handoff downloads. Browser file names are
+labels, not server paths. The adapter does not embed the loopback dashboard, disclose
+its token, relax its authentication, or serve arbitrary files.
 
 There is **one shared review position per retained library**, with optimistic
 `expected_version` conflict checks. Concurrent viewers deliberately share it.
@@ -78,16 +79,22 @@ record; different inputs or an ID occupied by another object kind fail. The view
 captures the complete text, interval, identity version and grant before its first
 request. An uncertain response retains those immutable inputs and the same ID;
 checking/retrying does not submit later typing. A separate request requires the
-explicit **New creation** or **New refinement** action. The view reconciles accepted
-jobs through `review_state` before retrying, without silently minting another ID.
+caller to deliberately use a new identity. The view reconciles accepted jobs through
+`review_state` before retrying, without silently minting another ID.
 
 `authorize_review` also accepts an optional retry identity. With one, it returns a
 retained authorization receipt; an exact retry never refills consumed allowance.
-Read `review_state` for the current remaining allowance. Without a retry identity,
-existing local callers retain the original deliberate allowance-replacement
-behavior. The portable view always supplies an authorization retry identity.
-Poll `review_state` for progress; do not resubmit to check progress or silently
-replace a failed attempt.
+Read `review_state` for the current remaining allowance. The portable view does not
+call it from **Apply**: it uses that already-retained allowance. Poll `review_state`
+for progress; do not resubmit to check progress or silently replace a failed attempt.
+
+Other effectful library operations accept an optional `request_id`. With one,
+`mutation_status` exposes the exact retained payload and completed receipt. If a
+process ends after acceptance but before its receipt can be completed, the retained
+outcome is explicitly pending rather than guessed from names, text, or current state.
+The dashboard persists exact Comment and Apply intents before transport calls, then
+acknowledges their receipts; reopening can retry an unacknowledged command without
+making a same-text deliberate new comment indistinguishable from that retry.
 
 Closing the MCP App, disconnecting stdio or switching chats does not cancel
 accepted work. Use `cancel_job` and inspect the terminal job/operation outcome;
@@ -100,6 +107,9 @@ Importing an identity or reading its guidance never authorizes its execution.
 `unfold_media_info` returns an opaque artifact ID, byte size, MIME type, hash,
 safe download name, and chunk size. Read standard resources at
 `unfold://artifact/{artifact_id}/{offset}` or call `unfold_read_artifact_chunk`.
+The App internally uses the same checked transfer shape for retained media,
+assets (`unfold://asset/{asset_id}/{offset}`) and server-prepared pack/handoff ZIPs
+(`unfold://download/{opaque_id}/{offset}`).
 Each result contains at most **192 KiB** of binary data (256 KiB base64). Reads are
 scoped to the requested retained artifact, with no caller-supplied filesystem path
 or localhost credential-bearing URL. Offsets outside the artifact fail. The
@@ -108,19 +118,36 @@ capturing the chunk from the same open file descriptor. Replaced paths cannot
 redirect a read; changing bytes fail the transfer. This uses POSIX descriptor
 operations and is exercised on macOS; Windows support is not claimed.
 
-The first implementation prioritizes integrity: each chunk request hashes the
-whole file once. It does not render or call a provider, and the view fetches an
-artifact only when it changes (not on each poll). The view assembles at most
-**32 MiB** into a local blob URL and clearly reports larger/unsupported media or
-missing host resource support. Use the export tool for larger videos. This is not
-HTTP range streaming or a resumable large-media protocol. Hosts should bound
-resource responses, preserve MIME metadata and keep server identity/authority
-bound to the original connection. The view requests no external network domains.
+The first implementation prioritizes integrity without rehashing a whole retained
+file for every 192 KiB request: metadata establishes a short-lived checked
+descriptor snapshot and each chunk rechecks that file's regular-file identity. The
+App verifies the completed SHA-256 before assigning a blob URL. It does not render
+or call a provider, and the view fetches an artifact only when it changes (not on
+each poll). The view assembles at most **32 MiB** into a local blob URL and clearly
+reports larger/unsupported media or missing host resource support. Use the export
+tool for larger videos. This is not HTTP range streaming or a resumable
+large-media protocol. Hosts should bound resource responses, preserve MIME metadata
+and keep server identity/authority bound to the original connection. The view
+requests no external network domains.
+
+Browser uploads are staged in a library-owned no-follow descriptor chain. A durable
+record serializes offsets, binds the regular-file device/inode, limits active uploads
+and expires abandoned staging. Pack preview/import uses a bounded server-owned
+snapshot of the inspected ZIP rather than reopening its staging path. Prepared
+downloads and preview snapshots have finite expiry/byte limits; retained creative
+work is not cleanup input. Results expose opaque IDs and safe labels only, never
+staging or server paths.
 
 Only packaged application code can request tool calls. Retained media is decoded
 as media, never inserted as executable HTML. Provider credentials remain in the
 server environment. The trusted model-side tools can return local paths for
 explicit library/CLI operations; the view never uses them as browser URLs.
+
+## Changelog
+
+- **2026-09-19** — Documented the native dashboard/MCP App parity transport and
+  bounded opaque transfers. This records implemented adapter behavior; it does not
+  claim draft contracts are accepted product evidence.
 
 ## Verification and scope
 

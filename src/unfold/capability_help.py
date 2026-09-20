@@ -77,6 +77,44 @@ CAPABILITY_HELP = {
         "Projects, revisions, drafts, jobs, authority, receipts and events.",
         "Reconciles interrupted workers but never restarts spending. Inspect a failed receipt before authorizing a new attempt.",
     ),
+    "mutation-status": (
+        "Read one retained non-model mutation receipt",
+        {"request_id": "0123456789abcdef0123456789abcdef"},
+        "The accepted payload and either completed result or explicit pending outcome.",
+        "A pending receipt is an uncertain interrupted mutation, not success. Inspect it before choosing a new request identity; do not repeat its effect by guessing from current state.",
+    ),
+    "retain-mutation-intent": (
+        "Persist one exact non-model UI operation before dispatch",
+        {
+            "operation": "rename",
+            "request_id": "0123456789abcdef0123456789abcdef",
+            "payload": {"identity": "ITEM", "name": "New name"},
+        },
+        "A durable pending operation intent.",
+        "Use the same identity only for the exact same payload. A retained intent is admission, not proof that its effect completed.",
+    ),
+    "acknowledge-mutation-intent": (
+        "Record delivery of a completed non-model mutation receipt",
+        {"request_id": "0123456789abcdef0123456789abcdef"},
+        "The corresponding intent marked acknowledged.",
+        "A pending or incomplete effect cannot be acknowledged. Inspect mutation-status before deciding on a new request.",
+    ),
+    "retain-feedback-intent": (
+        "Persist an exact comment command before its transport call",
+        {
+            "revision_id": "REVISION",
+            "text": "Keep the dot at the line tip",
+            "request_id": "0123456789abcdef0123456789abcdef",
+        },
+        "A durable pending comment intent with its exact target and text.",
+        "This records no feedback or model work. Reuse the identity only with the exact same input, then call feedback. It supports presentation recovery after a lost response.",
+    ),
+    "acknowledge-feedback-intent": (
+        "Record delivery of a retained comment receipt",
+        {"request_id": "0123456789abcdef0123456789abcdef"},
+        "The same feedback intent marked delivered.",
+        "Call only after feedback returns its retained receipt. If delivery is lost, retry feedback with the same identity; it returns the original note without duplicating it.",
+    ),
     "save-draft": (
         "Retain feedback without launching work",
         {
@@ -89,6 +127,17 @@ CAPABILITY_HELP = {
         "Saved draft, or the already newer draft.",
         "Increase sequence monotonically per revision. Times must fit that revision. Saving does not consume authority; submit-refinement is separate.",
     ),
+    "record-draft-conflict": (
+        "Retain a local unsaved draft separately from a newer shared draft",
+        {
+            "revision_id": "REVISION",
+            "conflict_id": "0123456789abcdef0123456789abcdef",
+            "local": {"revision_id": "REVISION", "text": "local", "at": 0, "end": None, "sequence": 2},
+            "remote": {"revision_id": "REVISION", "text": "shared", "at": 0, "end": None, "sequence": 3},
+        },
+        "A visible unresolved local draft conflict.",
+        "This never overwrites the shared draft. Edit the local text to save a deliberate newer draft, or leave it visible for later recovery.",
+    ),
     "submit-refinement": (
         "Apply feedback through the embedded agent",
         {
@@ -99,6 +148,23 @@ CAPABILITY_HELP = {
         },
         "Acknowledged durable review job; poll review-state for completion and result_revision.",
         "Requires current base and authorize-review allowance. Consumes once at acceptance, even on failure. Exact retries return the same job; changed input with the same request_id fails. Optional identity_version adopts a pack version. Closing the dashboard does not stop work; use cancel-refinement.",
+    ),
+    "retain-refinement-intent": (
+        "Persist an exact Apply command before its transport call",
+        {
+            "revision_id": "REVISION",
+            "text": "Keep the dot at the line tip",
+            "request_id": "0123456789abcdef0123456789abcdef",
+            "at": 3,
+        },
+        "A durable pending Apply intent with its exact revision, feedback and target.",
+        "This spends no allowance and starts no worker. Reuse the identity only with the exact same input, then call submit-refinement. Correct a definitely invalid draft before retaining a new intent.",
+    ),
+    "acknowledge-refinement-intent": (
+        "Record delivery of an accepted Apply receipt",
+        {"request_id": "0123456789abcdef0123456789abcdef"},
+        "The same Apply intent marked delivered.",
+        "Call only after submit-refinement returns its retained job. If delivery is lost, retry that exact request identity; it returns the same job without re-spending allowance.",
     ),
     "cancel-refinement": (
         "Request cancellation of a dashboard refinement",

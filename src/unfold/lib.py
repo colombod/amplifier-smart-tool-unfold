@@ -24,6 +24,155 @@ class Unfold(Review, Assets, Delivery):
         self.store = Store(library or Path.home() / ".local/share/unfold")
         self.backend = Backend(backend or Path.home() / ".local/share/unfold-backend")
 
+    def _mutation(self, operation, request_id, payload, effect):
+        """Persist exact non-model mutations before dispatching their first effect.
+
+        A completed receipt makes a lost acknowledgement safe to retry.  If a process
+        dies after an effect but before the receipt can be completed, the public
+        pending record deliberately refuses to guess success or repeat the effect.
+        """
+        if request_id is None:
+            return effect()
+        self.store.workspace(request_id)
+        fingerprint = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        with self.store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                receipt = self.store.get(request_id, db=db)
+            except UnfoldError:
+                receipt = None
+            if receipt:
+                if (
+                    receipt.get("kind") != "mutation_receipt"
+                    or receipt.get("operation") != operation
+                    or receipt.get("fingerprint") != fingerprint
+                ):
+                    raise UnfoldError(
+                        "REQUEST_CONFLICT",
+                        "Retry identity is already bound to different mutation input.",
+                    )
+                if receipt["status"] == "completed":
+                    return receipt["result"]
+                if receipt["status"] == "rejected":
+                    error = receipt["error"]
+                    raise UnfoldError(error["code"], error["message"], error.get("remedy"))
+                raise UnfoldError(
+                    "MUTATION_INCOMPLETE",
+                    "A prior mutation outcome is uncertain. Inspect its retained receipt before a new request.",
+                )
+            receipt = {
+                "id": request_id,
+                "kind": "mutation_receipt",
+                "operation": operation,
+                "payload": payload,
+                "fingerprint": fingerprint,
+                "status": "pending",
+                "accepted_at": time.time(),
+            }
+            self.store.put("mutation_receipt", receipt, db)
+            self.store.event("mutation_accepted", request_id, {"operation": operation}, db)
+        try:
+            result = effect()
+        except UnfoldError as error:
+            # A domain error can occur after an effect. Retain an explicitly
+            # incomplete receipt rather than erasing its admission and risking a
+            # duplicate retry. A corrected deliberate action must use a new ID.
+            with self.store.connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                try:
+                    current = self.store.get(request_id, "mutation_receipt", db)
+                except UnfoldError:
+                    current = None
+                if current and current["status"] == "pending":
+                    current.update(
+                        status="incomplete",
+                        error=error.as_dict(),
+                        incomplete_at=time.time(),
+                    )
+                    self.store.put("mutation_receipt", current, db)
+                    self.store.event(
+                        "mutation_incomplete",
+                        request_id,
+                        {"operation": operation, "code": error.code},
+                        db,
+                    )
+            raise
+        with self.store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            receipt = self.store.get(request_id, "mutation_receipt", db)
+            if receipt["status"] != "pending":
+                raise UnfoldError(
+                    "MUTATION_INCOMPLETE",
+                    "Mutation receipt changed while its effect completed; inspect retained state.",
+                )
+            receipt.update(status="completed", result=result, completed_at=time.time())
+            self.store.put("mutation_receipt", receipt, db)
+            self.store.event("mutation_completed", request_id, {"operation": operation}, db)
+        return result
+
+    def mutation_status(self, request_id):
+        """Read one durable non-model mutation receipt or incomplete pending intent."""
+        return self.store.get(request_id, "mutation_receipt")
+
+    def retain_mutation_intent(self, operation, request_id, payload):
+        """Durably bind one UI mutation before its first transport dispatch."""
+        if not isinstance(operation, str) or not operation:
+            raise UnfoldError("INVALID_INPUT", "Mutation operation is required.")
+        if not isinstance(payload, dict) or "request_id" in payload:
+            raise UnfoldError(
+                "INVALID_INPUT", "Mutation intent needs an exact object payload without request_id."
+            )
+        self.store.workspace(request_id)
+        intent_id = "mutation-intent-" + request_id
+        fingerprint = hashlib.sha256(
+            json.dumps({"operation": operation, "payload": payload}, sort_keys=True).encode()
+        ).hexdigest()
+        intent = {
+            "id": intent_id,
+            "kind": "mutation_intent",
+            "request_id": request_id,
+            "operation": operation,
+            "payload": payload,
+            "fingerprint": fingerprint,
+            "status": "pending",
+            "created_at": time.time(),
+        }
+        with self.store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                existing = self.store.get(intent_id, "mutation_intent", db)
+            except UnfoldError:
+                existing = None
+            if existing:
+                if existing["fingerprint"] != fingerprint:
+                    raise UnfoldError(
+                        "REQUEST_CONFLICT",
+                        "Retry identity is already bound to different mutation input.",
+                    )
+                return existing
+            self.store.put("mutation_intent", intent, db)
+            self.store.event("mutation_intent_retained", request_id, {"operation": operation}, db)
+        return intent
+
+    def acknowledge_mutation_intent(self, request_id):
+        """Mark a completed generic mutation receipt delivered to its presenter."""
+        intent_id = "mutation-intent-" + request_id
+        with self.store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            intent = self.store.get(intent_id, "mutation_intent", db)
+            receipt = self.store.get(request_id, "mutation_receipt", db)
+            if receipt["status"] != "completed":
+                raise UnfoldError(
+                    "MUTATION_INCOMPLETE", "Mutation outcome is not complete enough to acknowledge."
+                )
+            intent.update(status="acknowledged", acknowledged_at=time.time())
+            self.store.put("mutation_intent", intent, db)
+            receipt["acknowledged_at"] = intent["acknowledged_at"]
+            self.store.put("mutation_receipt", receipt, db)
+            return intent
+
     def _read_media(self, artifact_id, offset=None):
         """Hash and capture from one scoped descriptor, never a reopened path."""
         import stat
@@ -223,7 +372,14 @@ class Unfold(Review, Assets, Delivery):
     def observe(self, after=0):
         return self.store.events(after)
 
-    def rename(self, identity, name):
+    def rename(self, identity, name, request_id=None):
+        if request_id is not None:
+            return self._mutation(
+                "rename",
+                request_id,
+                {"identity": identity, "name": name},
+                lambda: self.rename(identity, name),
+            )
         if not isinstance(name, str) or not 1 <= len(name.strip()) <= 120:
             raise UnfoldError("INVALID_INPUT", "Use a name of 1–120 characters.")
         with self.store.connect() as db:
@@ -236,7 +392,14 @@ class Unfold(Review, Assets, Delivery):
             self.store.event("renamed", identity, {"name": name.strip()}, db)
         return record
 
-    def export(self, artifact_id, directory):
+    def export(self, artifact_id, directory, request_id=None):
+        if request_id is not None:
+            return self._mutation(
+                "export",
+                request_id,
+                {"artifact_id": artifact_id, "directory": str(directory)},
+                lambda: self.export(artifact_id, directory),
+            )
         artifact = self.artifact(artifact_id)
         revision = self.inspect(artifact["revision_id"])
         if artifact["integrity"] != "intact" or revision["source_integrity"] != "intact":
@@ -265,10 +428,16 @@ class Unfold(Review, Assets, Delivery):
         self.store.event("exported", artifact_id, result)
         return result
 
-    def feedback(self, revision_id, text):
+    def feedback(self, revision_id, text, request_id=None):
+        """Record one exact revision-bound note; exact retries return its receipt."""
         revision = self.store.get(revision_id, "revision")
         if not isinstance(text, str) or not 1 <= len(text.strip()) <= 5000:
             raise UnfoldError("INVALID_INPUT", "Feedback must have 1–5000 characters.")
+        payload = {"revision_id": revision_id, "text": text.strip()}
+        fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        intent_id = "feedback-intent-" + request_id if request_id is not None else None
+        if request_id is not None:
+            self.store.workspace(request_id)
         note = {
             "id": uid(),
             "kind": "feedback",
@@ -278,11 +447,114 @@ class Unfold(Review, Assets, Delivery):
             "status": "pending",
         }
         with self.store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if request_id is not None:
+                try:
+                    receipt = self.store.get(request_id, "feedback_receipt", db)
+                except UnfoldError:
+                    receipt = None
+                if receipt:
+                    if receipt["fingerprint"] != fingerprint:
+                        raise UnfoldError(
+                            "REQUEST_CONFLICT", "Retry identity has different comment input."
+                        )
+                    return self.store.get(receipt["feedback_id"], "feedback", db)
+                try:
+                    intent = self.store.get(intent_id, "feedback_intent", db)
+                except UnfoldError:
+                    intent = None
+                if intent and intent["fingerprint"] != fingerprint:
+                    raise UnfoldError(
+                        "REQUEST_CONFLICT", "Retry identity has different comment input."
+                    )
+                if intent is None:
+                    intent = {
+                        "id": intent_id,
+                        "kind": "feedback_intent",
+                        "request_id": request_id,
+                        "fingerprint": fingerprint,
+                        "payload": payload,
+                        "status": "pending",
+                        "created": time.time(),
+                    }
+                    self.store.put("feedback_intent", intent, db)
             self.store.put("feedback", note, db)
             self.store.event("feedback_submitted", revision_id, note, db)
+            if request_id is not None:
+                self.store.put(
+                    "feedback_receipt",
+                    {
+                        "id": request_id,
+                        "kind": "feedback_receipt",
+                        "fingerprint": fingerprint,
+                        "feedback_id": note["id"],
+                        "revision_id": revision_id,
+                    },
+                    db,
+                )
+                intent.update(status="completed", feedback_id=note["id"])
+                self.store.put("feedback_intent", intent, db)
         return note
 
-    def cancel(self, operation_id):
+    def retain_feedback_intent(self, revision_id, text, request_id):
+        """Durably bind one visible comment command before a presenter awaits transport."""
+        self.store.workspace(request_id)
+        self.store.get(revision_id, "revision")
+        if not isinstance(text, str) or not 1 <= len(text.strip()) <= 5000:
+            raise UnfoldError("INVALID_INPUT", "Feedback must have 1–5000 characters.")
+        payload = {"revision_id": revision_id, "text": text.strip()}
+        fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        intent_id = "feedback-intent-" + request_id
+        with self.store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                current = self.store.get(intent_id, db=db)
+            except UnfoldError:
+                current = None
+            if current:
+                if (
+                    current.get("kind") != "feedback_intent"
+                    or current.get("fingerprint") != fingerprint
+                ):
+                    raise UnfoldError(
+                        "REQUEST_CONFLICT", "Retry identity is already bound to different feedback."
+                    )
+                return current
+            intent = {
+                "id": intent_id,
+                "kind": "feedback_intent",
+                "request_id": request_id,
+                "fingerprint": fingerprint,
+                "payload": payload,
+                "status": "pending",
+                "created": time.time(),
+            }
+            self.store.put("feedback_intent", intent, db)
+            self.store.event(
+                "feedback_intent_retained", request_id, {"revision_id": revision_id}, db
+            )
+            return intent
+
+    def acknowledge_feedback_intent(self, request_id):
+        """Record delivery of a feedback receipt without changing the retained note."""
+        intent_id = "feedback-intent-" + request_id
+        with self.store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            intent = self.store.get(intent_id, "feedback_intent", db)
+            if intent["status"] != "completed":
+                raise UnfoldError("MUTATION_INCOMPLETE", "Feedback is not yet retained.")
+            intent["acknowledged_at"] = time.time()
+            self.store.put("feedback_intent", intent, db)
+            return intent
+
+    def cancel(self, operation_id, request_id=None):
+        if request_id is not None:
+            return self._mutation(
+                "cancel",
+                request_id,
+                {"operation_id": operation_id},
+                lambda: self.cancel(operation_id),
+            )
         with self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             operation = self.store.get(operation_id, "operation", db)
@@ -360,7 +632,14 @@ class Unfold(Review, Assets, Delivery):
             request_id=request_id,
         )
 
-    def render(self, revision_id):
+    def render(self, revision_id, request_id=None):
+        if request_id is not None:
+            return self._mutation(
+                "render",
+                request_id,
+                {"revision_id": revision_id},
+                lambda: self.render(revision_id),
+            )
         """Re-render a committed composition without initializing intelligence."""
         revision = self.inspect(revision_id)
         if revision.get("kind") != "revision" or revision["source_integrity"] != "intact":

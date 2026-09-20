@@ -221,6 +221,14 @@ class Dashboard:
                             "duplicate-pack",
                             "dependencies",
                             "remove",
+                            "mutation-status",
+                            "retain-mutation-intent",
+                            "acknowledge-mutation-intent",
+                            "record-draft-conflict",
+                            "retain-feedback-intent",
+                            "acknowledge-feedback-intent",
+                            "retain-refinement-intent",
+                            "acknowledge-refinement-intent",
                             "configure-delivery",
                             "render-delivery",
                         }:
@@ -230,9 +238,11 @@ class Dashboard:
                         identity = uid()
                         path = library.store.workspace(identity) / "export.zip"
                         if data["kind"] == "pack":
-                            result = library.export_pack(data["id"], path)
+                            result = library.export_pack(data["id"], path, data.get("request_id"))
                         elif data["kind"] == "handoff":
-                            result = library.export_handoff(data["id"], path)
+                            result = library.export_handoff(
+                                data["id"], path, data.get("request_id")
+                            )
                         else:
                             raise ValueError("Unknown export kind.")
                         library.store.put(
@@ -250,15 +260,17 @@ class Dashboard:
                             "manifest": result["manifest"],
                         }
                     elif self.path == "/feedback":
-                        result = library.feedback(data["revision_id"], data["text"])
+                        result = library.feedback(**data)
                     elif self.path == "/draft":
                         result = library.save_draft(**data)
+                    elif self.path == "/view":
+                        result = library.save_review_view(**data)
                     elif self.path == "/refine":
                         result = library.submit_refinement(**data)
                     elif self.path == "/cancel":
                         result = library.cancel_refinement(**data)
                     elif self.path == "/rename":
-                        result = library.rename(data["id"], data["name"])
+                        result = library.rename(data["id"], data["name"], data.get("request_id"))
                     else:
                         return self.respond(404, {"error": "Not found"})
                     return self.respond(200, result)

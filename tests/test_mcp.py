@@ -1,6 +1,8 @@
 """Optional standard MCP adapter: schemas, retained collaboration and binary resources."""
 
 import base64
+import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -161,16 +163,19 @@ def test_mcp_sdk_schema_resources_shared_actions_and_permission(tmp_path):
         ) as client:
             tools = (await client.list_tools()).tools
             creation = next(t for t in tools if t.name == "unfold_submit_creation")
-            assert next(
+            transfer = next(t for t in tools if t.name == "unfold_transfer_info")
+            assert not next(
                 t for t in tools if t.name == "unfold_cancel_job"
             ).annotations.destructive_hint
-            assert next(
+            assert not next(
                 t for t in tools if t.name == "unfold_save_draft"
             ).annotations.destructive_hint
+            assert next(t for t in tools if t.name == "unfold_remove").annotations.destructive_hint
             assert next(
                 t for t in tools if t.name == "unfold_media_info"
             ).annotations.read_only_hint
             assert creation.meta["ui"] == {"resourceUri": UI_URI, "visibility": ["model", "app"]}
+            assert transfer.meta["ui"] == {"resourceUri": UI_URI, "visibility": ["model", "app"]}
             assert (
                 creation.input_schema["$defs"]["Grant"]["properties"]["max_model_calls"]["maximum"]
                 == 24
@@ -260,6 +265,50 @@ def test_actual_stdio_restart_and_optional_import(tmp_path):
     assert check.returncode == 0, check.stderr
 
 
+def test_actual_stdio_restart_reconciles_a_public_feedback_intent_without_duplication(tmp_path):
+    pytest.importorskip("mcp")
+    import anyio
+    from mcp import Client
+    from mcp.client.stdio import StdioServerParameters
+
+    library, _, revisions, _ = seed_media_library(tmp_path, playable=False)
+    request = uid()
+    payload = {
+        "revision_id": revisions[-1],
+        "text": "Retain this exact note across process replacement",
+        "request_id": request,
+    }
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "unfold.mcp", "--library", str(tmp_path)],
+        env={"PATH": os.environ["PATH"]},
+    )
+
+    async def run():
+        async with Client(params) as client:
+            retained = await client.call_tool("unfold_retain_feedback_intent", payload)
+            assert not retained.is_error
+            accepted = await client.call_tool("unfold_feedback", payload)
+            assert not accepted.is_error
+            # Deliberately do not acknowledge the delivered receipt before stdio
+            # closes; the next presenter must recover the public exact command.
+        async with Client(params) as client:
+            state = await client.call_tool("unfold_review_state", {})
+            intent = state.structured_content["result"]["feedback_intents"][0]
+            assert intent["request_id"] == request
+            assert not intent.get("acknowledged_at")
+            replay = await client.call_tool("unfold_feedback", payload)
+            assert not replay.is_error
+            acknowledged = await client.call_tool(
+                "unfold_acknowledge_feedback_intent", {"request_id": request}
+            )
+            assert not acknowledged.is_error
+
+    anyio.run(run)
+    assert len(library.store.list("feedback")) == 1
+    assert library.review_state()["feedback_intents"][0]["acknowledged_at"]
+
+
 def test_retry_authorization_never_refills_consumed_allowance(tmp_path, monkeypatch):
     library, project, revisions, _ = seed_media_library(tmp_path, playable=False)
     monkeypatch.setattr(library, "_launch_review_job", lambda identity: library.store.get(identity))
@@ -309,3 +358,51 @@ def test_paid_request_ids_never_overwrite_other_retained_object_kinds(tmp_path, 
     assert not library.store.list("review_job")
     assert not library.store.list("review_authorization")
     assert not library.store.list("authority")
+
+
+def test_nonmodel_effect_receipts_are_exact_and_pending_outcomes_fail_loudly(tmp_path):
+    library = Unfold(tmp_path)
+    request = uid()
+    first = library.save_pack(
+        "Retained",
+        {"required": "blue"},
+        request_id=request,
+    )
+    assert (
+        library.save_pack(
+            "Retained",
+            {"required": "blue"},
+            request_id=request,
+        )
+        == first
+    )
+    assert len(library.packs()) == 1
+    with pytest.raises(UnfoldError, match="different mutation"):
+        library.save_pack("Changed", {"required": "blue"}, request_id=request)
+    receipt = library.mutation_status(request)
+    assert receipt["status"] == "completed"
+    assert receipt["result"]["id"] == first["id"]
+
+    uncertain = uid()
+    library.store.put(
+        "mutation_receipt",
+        {
+            "id": uncertain,
+            "kind": "mutation_receipt",
+            "operation": "remove",
+            "fingerprint": hashlib.sha256(
+                json.dumps(
+                    {"identity": first["id"]}, sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest(),
+            "payload": {"identity": first["id"]},
+            "status": "pending",
+        },
+    )
+    assert library.mutation_status(uncertain)["status"] == "pending"
+    # A caller holding an incomplete operation identity cannot use it to make a
+    # fresh destructive request: it receives an explicit uncertain disposition.
+    with pytest.raises(UnfoldError) as caught:
+        library.remove(first["id"], request_id=uncertain)
+    assert caught.value.code == "MUTATION_INCOMPLETE"
+    assert library.store.get(first["id"], "pack")["id"] == first["id"]
