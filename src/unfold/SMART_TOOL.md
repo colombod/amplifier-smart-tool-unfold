@@ -34,6 +34,10 @@ bounded direct refinement, cancellation and observable outcomes. Identity ZIPs c
 guidance and eligible assets. Delivery supports silent transparent ProRes 4444 MOV
 and H.264 MP4 with optional reference footage and imported audio.
 
+Closed polygon paths can animate individual corner angles on a circular track,
+with attached corner markers. This supports irregular shapes resolving into
+regular polygons without corners leaving the track.
+
 This is not the entire draft vision. Arbitrary HTML/CSS, custom-font rendering,
 external source-edit adoption, editable project ZIP round trips, transcription,
 audio generation and renderer migration are not supported. Fonts can be stored,
