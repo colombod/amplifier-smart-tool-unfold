@@ -80,7 +80,11 @@ def geometry(element):
 
 def run(argv, timeout=180):
     # Renderer processes have no provider credentials, user configuration or telemetry.
-    env = {key: os.environ[key] for key in ("PATH", "TMPDIR", "SYSTEMROOT") if key in os.environ}
+    env = {
+        key: os.environ[key]
+        for key in ("PATH", "TMPDIR", "TMP", "TEMP", "SYSTEMROOT")
+        if key in os.environ
+    }
     env.update(HYPERFRAMES_NO_TELEMETRY="1", DO_NOT_TRACK="1")
     try:
         result = subprocess.run(argv, capture_output=True, text=True, env=env, timeout=timeout)
@@ -96,8 +100,11 @@ def run(argv, timeout=180):
 class Backend:
     def __init__(self, root):
         self.root = Path(root).expanduser().resolve()
-        self.cli = self.root / "node_modules/.bin/hyperframes"
+        self.cli = self.root / "node_modules/hyperframes/bin/hyperframes.mjs"
         self.gsap = self.root / "node_modules/gsap/dist/gsap.min.js"
+
+    def _run_cli(self, arguments, timeout=240):
+        return run(["node", str(self.cli), *arguments], timeout=timeout)
 
     def doctor(self):
         versions = {}
@@ -316,9 +323,8 @@ window.__timelines.unfold=tl;
                     "SOURCE_CHANGED",
                     "Generated source was externally modified; no code was executed or replaced.",
                 )
-        run(
+        self._run_cli(
             [
-                str(self.cli),
                 "render",
                 str(directory),
                 "--output",
