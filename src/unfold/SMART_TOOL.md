@@ -11,6 +11,8 @@ use_cases:
   - Review, rename and export saved outputs without a model
 platforms:
   - macos
+  - linux
+  - windows
 requires:
   - name: Node.js, HyperFrames 0.8.33 and GSAP 3.14.2
     purpose: Render existing compositions; not needed for help or retained-state reads.

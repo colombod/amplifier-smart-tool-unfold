@@ -36,8 +36,8 @@ repository currently requires GitHub access.
 
 Use a coding agent that can run local tools and open a browser. Unfold requires
 Python 3.12+, Git, uv, Node.js, and FFmpeg with FFprobe. Your agent can follow the
-usage skill to install the pinned renderer dependencies. The current implementation
-has been exercised on macOS.
+usage skill to install the pinned renderer dependencies. Unfold runs on macOS,
+Linux, and Windows.
 
 Creative work uses **Amplifier Agent** and needs its own configured model access.
 Your coding agent's access is not automatically shared with Unfold. Ask your agent
