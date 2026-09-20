@@ -184,3 +184,63 @@ def test_mcp_poll_preserves_active_playback_and_invalidates_tampered_output(tmp_
             await browser.close()
 
     asyncio.run(run())
+
+
+def test_mcp_teardown_flushes_debounced_draft_before_bridge_closes(tmp_path):
+    async def run():
+        library, _, revisions, _ = seed_media_library(tmp_path)
+        async with Client(create_server(library)) as client, async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            page = await browser.new_page(viewport={"width": 1180, "height": 900})
+            calls = []
+
+            async def call(params):
+                calls.append(params["name"])
+                result = await client.call_tool(params["name"], params.get("arguments", {}))
+                return result.model_dump(by_alias=True, exclude_none=True)
+
+            async def read(params):
+                return (await client.read_resource(params["uri"])).model_dump(
+                    by_alias=True, exclude_none=True
+                )
+
+            await page.expose_function("hostCall", call)
+            await page.expose_function("hostRead", read)
+            await page.goto("about:blank")
+            await page.add_script_tag(content=host_script())
+            initial = await client.call_tool("unfold_review_state", {})
+            await page.evaluate(
+                "([html,result])=>mountUnfold(html,result)",
+                [mcp_html(), initial.model_dump(by_alias=True, exclude_none=True)],
+            )
+            frame = page.frame_locator("#app")
+            await expect(frame.locator("#players video")).to_have_js_property("videoWidth", 320)
+            await frame.locator("#feedbackToggle").click()
+            # Input and teardown in one event turn: the debounce cannot fire first.
+            await page.evaluate("""() => {
+                window.teardownDone = new Promise((resolve, reject) => {
+                    const listener = event => {
+                        if (!event.data?.fixtureTeardown) return;
+                        window.removeEventListener('message', listener);
+                        unfoldBridge.teardownResource({}).then(resolve, reject);
+                    };
+                    window.addEventListener('message', listener);
+                });
+            }""")
+            await frame.locator("#feedback").evaluate(
+                """element => {
+                    element.value = 'Last edit before closing';
+                    element.dispatchEvent(new Event('input', {bubbles: true}));
+                    parent.postMessage({fixtureTeardown: true}, '*');
+                }"""
+            )
+            await page.evaluate("() => window.teardownDone")
+            draft = next(
+                d for d in library.review_state()["drafts"] if d["revision_id"] == revisions[-1]
+            )
+            assert draft["text"] == "Last edit before closing"
+            assert "unfold_submit_refinement" not in calls
+            assert "unfold_feedback" not in calls
+            await browser.close()
+
+    asyncio.run(run())

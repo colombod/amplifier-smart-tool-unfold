@@ -35,6 +35,11 @@ media, or opening a view never grants or starts model work. Limits are not a dol
 cap. These are a trusted local stdio server's capabilities, not a security sandbox
 for the local user or a multi-tenant authentication layer.
 
+On standard `ui/resource-teardown`, the App flushes unsaved feedback and review
+position before acknowledging teardown, then releases its timers and media.
+Closing does not submit feedback or start refinement. Abrupt host/process loss
+cannot guarantee delivery of input that has not yet been saved.
+
 ## One library, two collaborators
 
 Call `unfold_review_state` to open `ui://unfold/review`. The portable App is built

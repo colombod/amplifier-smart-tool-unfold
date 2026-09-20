@@ -536,8 +536,8 @@ async function saveDraft(body = draftSnapshot()) {
   }
   return acknowledged;
 }
-async function saveReviewView() {
-  if (!revisionId || destroyed) return;
+async function saveReviewView(flush = false) {
+  if (!revisionId || (destroyed && !flush)) return;
   const payload = {
     revision_id: revisionId,
     artifact_id: selectedArtifact(),
@@ -1420,6 +1420,7 @@ function recoverPendingIntents() {
 async function refresh() {
   const next = await api("/state"),
     first = !state;
+  if (destroyed) return;
   state = next;
   transport?.onState?.(state);
   const shared = state.views?.find((view) =>
@@ -1524,12 +1525,19 @@ window.unfoldInvalidateMedia = (path) => {
       drawDelivery();
   }
 };
-window.unfoldTeardown = () => {
+window.unfoldTeardown = async () => {
   destroyed = true;
   clearTimeout(draftTimer);
   clearTimeout(viewTimer);
   clearInterval(pollTimer);
-  releaseMediaWithin(document);
+  try {
+    // The host keeps the bridge open until teardown resolves. Flush typing
+    // that has not reached the debounce timer without submitting model work.
+    if (draftDirty) await saveDraft();
+    if (revisionId) await saveReviewView(true);
+  } finally {
+    releaseMediaWithin(document);
+  }
 };
 
 function drawTheme() {

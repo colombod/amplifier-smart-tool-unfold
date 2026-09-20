@@ -97,11 +97,9 @@ function mergeContext(delta = {}) {
       },
     },
   };
-  const mode =
-    hostContext.theme === "dark" || hostContext.theme === "light"
-      ? hostContext.theme
-      : "light";
-  document.documentElement.dataset.hostTheme = mode;
+  if (hostContext.theme === "dark" || hostContext.theme === "light")
+    document.documentElement.dataset.hostTheme = hostContext.theme;
+  else delete document.documentElement.dataset.hostTheme;
 }
 
 function opaque(path) {
@@ -291,10 +289,13 @@ app.ontoolresult = async (result) => {
 };
 app.onteardown = async () => {
   tornDown = true;
-  window.unfoldTeardown?.();
-  for (const { url } of objectUrls.values()) if (url) URL.revokeObjectURL(url);
-  objectUrls.clear();
-  mediaEntries.clear();
+  try {
+    await window.unfoldTeardown?.();
+  } finally {
+    for (const { url } of objectUrls.values()) if (url) URL.revokeObjectURL(url);
+    objectUrls.clear();
+    mediaEntries.clear();
+  }
   return {};
 };
 
