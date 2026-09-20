@@ -48,8 +48,12 @@ def test_stop_worker_stops_descendants(tmp_path):
         if process.poll() is None:
             process.kill()
             process.wait(timeout=10)
-        if child and child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
-            child.kill()
+        if child:
+            try:
+                if child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
+                    child.kill()
+            except psutil.NoSuchProcess:
+                pass
 
 
 def test_recorded_worker_does_not_kill_unrelated_process(tmp_path):

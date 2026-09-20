@@ -38,12 +38,12 @@ def stop_tree(process):
                 except psutil.NoSuchProcess:
                     pass
             process.kill()
-        finally:
+        except Exception:
             try:
-                if process.is_running():
-                    process.resume()
-            except psutil.NoSuchProcess:
+                process.resume()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
+            raise
         _, alive = psutil.wait_procs([*children, process], timeout=10)
         if alive:
             raise TimeoutError("Owned worker processes did not stop")
