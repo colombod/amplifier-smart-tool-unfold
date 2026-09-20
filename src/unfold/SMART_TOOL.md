@@ -174,6 +174,8 @@ are readable from another process. Supply a 32-character lowercase hexadecimal
 return the prior state, including running/failed states, without spending again.
 Different input with the same ID fails. After caller/process loss a record may remain
 running; this means uncertain interruption, not permission to retry automatically.
+Worker status checks do not send signals. Cleanup stops the owned worker tree;
+recovery checks the exact worker command and request path before stopping it.
 Direct synchronous calls need a live supervisor for cancellation. Dashboard jobs
 reconcile completed or interrupted supervisors on `review_state`; they never restart
 spending automatically. A new creative attempt requires a new request identity.

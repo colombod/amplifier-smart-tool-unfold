@@ -9,6 +9,7 @@ import threading
 import time
 
 from .models import Brief, Grant, UnfoldError
+from .processes import is_alive, stop_recorded_worker
 from .store import uid
 
 
@@ -578,11 +579,7 @@ class Review:
                 continue
             alive = False
             if job.get("pid"):
-                try:
-                    os.kill(job["pid"], 0)
-                    alive = True
-                except ProcessLookupError:
-                    pass
+                alive = is_alive(job["pid"])
             elif time.time() - job["created"] < 10:
                 alive = True
             if alive:
@@ -637,16 +634,7 @@ class Review:
         if not pid:
             return
         expected = str(self.store.workspace(operation["id"]) / "request.json")
-        result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True
-        )
-        if "unfold.worker" in result.stdout and expected in result.stdout:
-            import signal
-
-            try:
-                os.killpg(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        stop_recorded_worker(pid, expected)
         operation.update(
             status="failed",
             error={

@@ -5,7 +5,6 @@ import json
 import os
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import time
@@ -15,6 +14,7 @@ from .assets import Assets
 from .backend import Backend
 from .delivery import Delivery
 from .models import Brief, Grant, UnfoldError
+from .processes import stop_worker
 from .review import Review
 from .store import Store, digest, uid, write_json
 
@@ -924,14 +924,7 @@ class Unfold(Review, Assets, Delivery):
         finally:
             self._stop_worker(process)
 
-    @staticmethod
-    def _stop_worker(process):
-        if process:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait(timeout=10)
+    _stop_worker = staticmethod(stop_worker)
 
     def dashboard(self, port=0):
         from .dashboard import Dashboard
