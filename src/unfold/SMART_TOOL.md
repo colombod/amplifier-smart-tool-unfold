@@ -22,6 +22,12 @@ requires:
     purpose: Decode video observations and inspect encoded media.
     install: https://ffmpeg.org/download.html
     optional: true
+  - name: Linux system libraries (unzip and Chromium dependencies)
+    purpose: On Ubuntu 24.04, HyperFrames requires a zip archiver and headless Chromium shared libraries for rendering.
+    install: "apt-get install unzip libnss3 libnspr4 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 libdrm2 libxkbcommon0 libatspi2.0-0t64 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64"
+    optional: true
+    platforms:
+      - linux
 ---
 # Unfold
 
