@@ -1,8 +1,11 @@
 import { build } from "esbuild";
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+const root = new URL(".", import.meta.url);
+const nativeRoot = new URL("../src/unfold/resources/", root);
 const result = await build({
-  entryPoints: [new URL("app.js", import.meta.url).pathname],
+  absWorkingDir: root.pathname,
+  entryPoints: ["app.js"],
   bundle: true,
   minify: true,
   write: false,
@@ -11,19 +14,33 @@ const result = await build({
   legalComments: "inline",
   metafile: true,
 });
-const template = await readFile(new URL("index.html", import.meta.url), "utf8");
+// The portable view is the dashboard over MCP transport, never a second UI.  Keeping
+// the native document and stylesheet here makes divergence a build-time impossibility.
+const nativeIndex = await readFile(new URL("dashboard.html", nativeRoot), "utf8");
+const nativeCss = await readFile(new URL("dashboard.css", nativeRoot), "utf8");
+const nativeTheme = await readFile(new URL("theme.js", nativeRoot), "utf8");
+const template = nativeIndex
+  .replace(
+    '<script src="/theme.js"></script>',
+    `<script>${nativeTheme.replaceAll("</script", "<\\/script")}</script>`,
+  )
+  .replace(
+    '<link rel="stylesheet" href="/dashboard.css" />',
+    `<style data-unfold-native-css>${nativeCss}</style>`,
+  )
+  .replace('<script src="/dashboard.js"></script>', "<!-- APP_SCRIPT -->");
 const script = result.outputFiles[0].text.replaceAll("</script", "<\\/script");
 await writeFile(
-  new URL("../src/unfold/resources/mcp_app.html", import.meta.url),
+  new URL("../src/unfold/resources/mcp_app.html", root),
   template.replace(
     "<!-- APP_SCRIPT -->",
     () => `<script type="module">${script}</script>`,
   ),
 );
 const packages = new Set();
-for (const input of Object.keys(result.metafile.inputs)) {
+for (const input of Object.keys(result.metafile.inputs).sort()) {
   const pieces = path
-    .resolve(input)
+    .resolve(root.pathname, input)
     .split(`${path.sep}node_modules${path.sep}`);
   if (pieces.length < 2) continue;
   const tail = pieces.at(-1).split(path.sep);
@@ -45,6 +62,6 @@ for (const directory of [...packages].sort()) {
   licenses += `${metadata.name} ${metadata.version}\n${await readFile(path.join(directory, license), "utf8")}\n\n`;
 }
 await writeFile(
-  new URL("../src/unfold/resources/mcp_app.LICENSE.txt", import.meta.url),
+  new URL("../src/unfold/resources/mcp_app.LICENSE.txt", root),
   licenses.replace(/[ \t]+$/gm, "").trimEnd() + "\n",
 );

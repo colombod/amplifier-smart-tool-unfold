@@ -128,3 +128,15 @@ and bundled dependency license notice after changing `mcp-app/`; Node is a build
 dependency only. `npm ci` reproduces the SDK bundle pinned in package-lock.json.
 Media navigation regressions must cover failed loads after a valid preview: old
 video/image sources and download links must not remain under the new revision.
+The MCP App is built from the native `dashboard.html`, `dashboard.css`,
+`theme.js` and `dashboard.js`; do not reintroduce an independent portable page or
+controller. Verify the generated resource has the native controls at matched inner
+viewports, and keep the MCP transport limited to opaque checked asset/artifact/
+prepared-download bytes rather than browser-visible paths or loopback URLs.
+MCP upload staging must use descriptor-relative no-follow opens, regular-file identity
+checks and a durable serialized record update. Do not reintroduce path strings into
+App-visible records or a whole-file rehash on every bounded resource chunk.
+Pack preview/import must consume the checked server-owned snapshot, not reopen an
+inspected staging pathname. Preserve finite expiry/count/byte cleanup for staging,
+preview snapshots and prepared transfers, while keeping records needed to recover an
+explicitly incomplete effect.

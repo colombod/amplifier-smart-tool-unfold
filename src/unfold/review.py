@@ -9,6 +9,7 @@ import threading
 import time
 
 from .models import Brief, Grant, UnfoldError
+from .processes import is_alive, stop_recorded_worker
 from .store import uid
 
 
@@ -59,14 +60,37 @@ class Review:
             )
         return self._launch_review_job(request_id)
 
-    def cancel_job(self, job_id):
+    def cancel_job(self, job_id, request_id=None):
         """Request cancellation of owned creation or refinement; inspect review_state for cleanup."""
-        return self.cancel_refinement(job_id)
+        return self.cancel_refinement(job_id, request_id)
 
     def save_review_view(
-        self, revision_id, at=0, playing=False, artifact_id=None, expected_version=None
+        self,
+        revision_id,
+        at=0,
+        playing=False,
+        artifact_id=None,
+        expected_version=None,
+        theme=None,
+        request_id=None,
     ):
         """Persist the shared review position; changing it never selects creative work or grants execution."""
+        if request_id is not None:
+            return self._mutation(
+                "save_review_view",
+                request_id,
+                {
+                    "revision_id": revision_id,
+                    "at": at,
+                    "playing": playing,
+                    "artifact_id": artifact_id,
+                    "expected_version": expected_version,
+                    "theme": theme,
+                },
+                lambda: self.save_review_view(
+                    revision_id, at, playing, artifact_id, expected_version, theme
+                ),
+            )
         import math
 
         revision = self.store.get(revision_id, "revision")
@@ -88,6 +112,8 @@ class Review:
             raise UnfoldError(
                 "INVALID_INPUT", "Expected view version must be a nonnegative integer."
             )
+        if theme is not None and theme not in ("system", "light", "dark"):
+            raise UnfoldError("INVALID_INPUT", "Theme must be system, light, or dark.")
         with self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
@@ -106,6 +132,7 @@ class Review:
                 "at": at,
                 "playing": playing,
                 "artifact_id": artifact_id,
+                "theme": theme,
                 "version": old["version"] + 1,
                 "updated_at": time.time(),
             }
@@ -165,7 +192,32 @@ class Review:
             self.store.put("review_authorization", receipt, db)
             return receipt
 
-    def save_draft(self, revision_id, text, at=0, end=None, sequence=0):
+    def save_draft(
+        self,
+        revision_id,
+        text,
+        at=0,
+        end=None,
+        sequence=0,
+        request_id=None,
+        resolve_conflict_id=None,
+    ):
+        if request_id is not None:
+            return self._mutation(
+                "save_draft",
+                request_id,
+                {
+                    "revision_id": revision_id,
+                    "text": text,
+                    "at": at,
+                    "end": end,
+                    "sequence": sequence,
+                    "resolve_conflict_id": resolve_conflict_id,
+                },
+                lambda: self.save_draft(
+                    revision_id, text, at, end, sequence, resolve_conflict_id=resolve_conflict_id
+                ),
+            )
         revision = self.store.get(revision_id, "revision")
         duration = revision.get("brief", {}).get("duration", 60)
         if not isinstance(text, str) or len(text) > 5000 or not 0 <= at <= duration:
@@ -194,7 +246,122 @@ class Review:
             except UnfoldError:
                 pass
             self.store.put("draft", record, db)
+            if resolve_conflict_id:
+                conflict = self.store.get(resolve_conflict_id, "draft_conflict", db)
+                if conflict["revision_id"] != revision_id:
+                    raise UnfoldError("REQUEST_CONFLICT", "Draft conflict belongs to another revision.")
+                conflict.update(status="resolved", resolved_at=time.time(), resolution=record)
+                self.store.put("draft_conflict", conflict, db)
         return record
+
+    def record_draft_conflict(self, revision_id, local, remote, conflict_id):
+        """Retain local unsaved text separately when a newer shared draft wins."""
+        self.store.workspace(conflict_id)
+        revision = self.store.get(revision_id, "revision")
+        if (
+            not isinstance(local, dict)
+            or local.get("revision_id") != revision_id
+            or not isinstance(local.get("text"), str)
+            or len(local["text"]) > 5000
+        ):
+            raise UnfoldError("INVALID_INPUT", "A conflict must retain one exact draft snapshot.")
+        duration = revision.get("brief", {}).get("duration", 60)
+        if not 0 <= local.get("at", -1) <= duration or (
+            local.get("end") is not None and not local["at"] <= local["end"] <= duration
+        ):
+            raise UnfoldError("INVALID_INPUT", "Conflict draft time must fit the viewed revision.")
+        payload = {
+            "id": conflict_id,
+            "kind": "draft_conflict",
+            "revision_id": revision_id,
+            "local": {
+                key: local[key] for key in ("revision_id", "text", "at", "end", "sequence")
+            },
+            "remote": {
+                key: remote.get(key) for key in ("revision_id", "text", "at", "end", "sequence")
+            },
+            "status": "open",
+            "created_at": time.time(),
+        }
+        with self.store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                prior = self.store.get(conflict_id, "draft_conflict", db)
+            except UnfoldError:
+                prior = None
+            if prior:
+                if prior["local"] != payload["local"] or prior["remote"] != payload["remote"]:
+                    raise UnfoldError(
+                        "REQUEST_CONFLICT", "Conflict identity is already bound to different drafts."
+                    )
+                return prior
+            self.store.put("draft_conflict", payload, db)
+            self.store.event(
+                "draft_conflict_retained",
+                revision_id,
+                {"conflict_id": conflict_id, "remote_sequence": payload["remote"]["sequence"]},
+                db,
+            )
+        return payload
+
+    def retain_refinement_intent(
+        self, revision_id, text, request_id, at=0, end=None, identity_version=None
+    ):
+        """Retain an exact Apply command before its presenter awaits another call."""
+        self.store.workspace(request_id)
+        rev = self.store.get(revision_id, "revision")
+        if not isinstance(text, str) or not text.strip() or len(text) > 5000:
+            raise UnfoldError("INVALID_INPUT", "Write feedback before applying it.")
+        duration = rev.get("brief", {}).get("duration", 60)
+        if not 0 <= at <= duration or (end is not None and not at <= end <= duration):
+            raise UnfoldError("INVALID_INPUT", "Feedback time must fit the viewed revision.")
+        payload = {
+            "revision_id": revision_id,
+            "text": text,
+            "at": at,
+            "end": end,
+            "identity_version": identity_version,
+        }
+        fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        intent_id = "refinement-intent-" + request_id
+        with self.store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                existing = self.store.get(intent_id, "refinement_intent", db)
+            except UnfoldError:
+                existing = None
+            if existing:
+                if existing["fingerprint"] != fingerprint:
+                    raise UnfoldError(
+                        "REQUEST_CONFLICT", "Retry identity is already bound to different feedback."
+                    )
+                return existing
+            intent = {
+                "id": intent_id,
+                "kind": "refinement_intent",
+                "request_id": request_id,
+                "fingerprint": fingerprint,
+                "payload": payload,
+                "status": "pending",
+                "created": time.time(),
+            }
+            self.store.put("refinement_intent", intent, db)
+            self.store.event(
+                "refinement_intent_retained", request_id, {"revision_id": revision_id}, db
+            )
+            return intent
+
+    def acknowledge_refinement_intent(self, request_id):
+        """Record delivery of an accepted Apply receipt; never launches work."""
+        intent_id = "refinement-intent-" + request_id
+        with self.store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            intent = self.store.get(intent_id, "refinement_intent", db)
+            if intent["status"] != "accepted":
+                raise UnfoldError("MUTATION_INCOMPLETE", "Apply is not yet accepted.")
+            intent["acknowledged_at"] = time.time()
+            self.store.put("refinement_intent", intent, db)
+            return intent
 
     def submit_refinement(
         self, revision_id, text, request_id, at=0, end=None, identity_version=None
@@ -215,6 +382,7 @@ class Review:
             "identity_version": identity_version,
         }
         fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        intent_id = "refinement-intent-" + request_id
         with self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
@@ -225,6 +393,12 @@ class Review:
                 if old.get("kind") != "review_job" or old.get("fingerprint") != fingerprint:
                     raise UnfoldError("REQUEST_CONFLICT", "Retry identity has different feedback.")
                 return old
+            try:
+                intent = self.store.get(intent_id, "refinement_intent", db)
+            except UnfoldError:
+                intent = None
+            if intent and intent["fingerprint"] != fingerprint:
+                raise UnfoldError("REQUEST_CONFLICT", "Retry identity has different feedback.")
             project = self.store.get(rev["project_id"], "project", db)
             if project["current_revision"] != revision_id:
                 raise UnfoldError(
@@ -272,6 +446,9 @@ class Review:
             self.store.put("authority", authority, db)
             self.store.put("feedback", note, db)
             self.store.put("review_job", job, db)
+            if intent:
+                intent.update(status="accepted", job_id=request_id)
+                self.store.put("refinement_intent", intent, db)
             try:
                 draft = self.store.get(revision_id + "-draft", "draft", db)
                 if all(draft.get(k) == payload.get(k) for k in ("text", "at", "end")):
@@ -372,7 +549,14 @@ class Review:
             )
             return job
 
-    def cancel_refinement(self, job_id):
+    def cancel_refinement(self, job_id, request_id=None):
+        if request_id is not None:
+            return self._mutation(
+                "cancel_refinement",
+                request_id,
+                {"job_id": job_id},
+                lambda: self.cancel_refinement(job_id),
+            )
         with self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             job = self.store.get(job_id, "review_job", db)
@@ -395,11 +579,7 @@ class Review:
                 continue
             alive = False
             if job.get("pid"):
-                try:
-                    os.kill(job["pid"], 0)
-                    alive = True
-                except ProcessLookupError:
-                    pass
+                alive = is_alive(job["pid"])
             elif time.time() - job["created"] < 10:
                 alive = True
             if alive:
@@ -434,7 +614,12 @@ class Review:
             "events": self.observe(),
             "jobs": self.store.list("review_job"),
             "drafts": self.store.list("draft"),
+            "draft_conflicts": self.store.list("draft_conflict"),
             "views": self.store.list("review_view"),
+            "feedback_intents": self.store.list("feedback_intent"),
+            "refinement_intents": self.store.list("refinement_intent"),
+            "mutation_receipts": self.store.list("mutation_receipt"),
+            "mutation_intents": self.store.list("mutation_intent"),
             "authorities": self.store.list("authority"),
             "assets": self.assets(),
             "packs": self.packs(),
@@ -449,16 +634,7 @@ class Review:
         if not pid:
             return
         expected = str(self.store.workspace(operation["id"]) / "request.json")
-        result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True
-        )
-        if "unfold.worker" in result.stdout and expected in result.stdout:
-            import signal
-
-            try:
-                os.killpg(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        stop_recorded_worker(pid, expected)
         operation.update(
             status="failed",
             error={

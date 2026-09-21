@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from unfold import Unfold, UnfoldError
-from unfold.store import uid
+from unfold.store import digest, uid
 
 
 @pytest.fixture
@@ -182,7 +182,14 @@ def test_removing_output_retains_source(tmp_path):
     revision["artifacts"] = [a]
     library.store.put("revision", revision)
     library.store.put(
-        "artifact", {"id": a, "kind": "artifact", "relative_path": "output.mp4", "revision_id": r}
+        "artifact",
+        {
+            "id": a,
+            "kind": "artifact",
+            "relative_path": "output.mp4",
+            "revision_id": r,
+            "sha256": digest(path),
+        },
     )
     library.remove(a)
     assert library.store.get(r)["artifacts"] == []

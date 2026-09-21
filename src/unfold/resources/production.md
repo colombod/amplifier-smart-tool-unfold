@@ -102,3 +102,24 @@ tweens and camera moves are preserved by code; the resulting full scene is valid
 Render and inspect the patched result before submission. Image elements may use only
 an asset_id from AVAILABLE IDENTITY IMAGES. Reference samples are supplied recording
 context, not generated-output evidence or proof of events beyond the inspected frames.
+
+For independently moving corners on a circular track, use a closed `path` with
+`points:[]` and `orbit:{center:[cx,cy],radius:r,angles:[...],marker_radius:4}`.
+Center is LOCAL to the element. Angles are degrees, zero right, positive clockwise.
+The renderer computes the connected outline AND its corner markers from those
+same angles every frame. This changes the polygon itself, not just its rotation.
+All vertices stay exactly on the circle, even with easing. Orbit bounds including
+markers and half the stroke width must fit the element. No arrowheads on orbits.
+Animate `orbit_angles:[...]` on a tween targeting that path. Preserve vertex count
+and corner order; choose unwrapped angles to control direction (350 to 370 crosses
+zero forward, 350 to 10 travels backward). Do not overlap angle tweens. Angles are
+bounded to -3600..3600. Use unequal angular gaps for irregular cyclic polygons,
+then evenly spaced angles for squares. Each vertex interpolates independently.
+`marker_opacity` on a tween fades the attached markers independently of the path.
+Do not create separate moving dots or approximate arcs with x/y chord motion.
+Static `points` and `orbit` are mutually exclusive. For a reference circle, note
+that circle stroke center radius is (width - stroke_width)/2: choose its bounds
+accordingly to match the orbit radius. Keep whole-element scale at 1 and avoid
+translation if the orbit must stay aligned with a stationary background circle.
+Example: a 640x640 path with center [320,320], radius 300, angles [10,75,190,290]
+and closed true can tween to [45,135,225,315] to resolve an irregular shape to a square.

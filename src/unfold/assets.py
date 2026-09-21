@@ -3,6 +3,7 @@
 import hashlib
 import json
 import mimetypes
+import os
 import re
 import shutil
 import stat
@@ -10,7 +11,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 from .models import UnfoldError
-from .store import digest, portable_archive, uid
+from .store import digest, portable_archive, uid, write_all
 
 MAX_PACK = 256 * 1024 * 1024
 MAX_FILES = 256
@@ -44,8 +45,29 @@ class Assets:
         return a
 
     def import_asset(
-        self, path, name=None, role="image", mode="copy", rights="unknown", attribution=""
+        self,
+        path,
+        name=None,
+        role="image",
+        mode="copy",
+        rights="unknown",
+        attribution="",
+        request_id=None,
     ):
+        if request_id is not None:
+            return self._mutation(
+                "import_asset",
+                request_id,
+                {
+                    "path": str(path),
+                    "name": name,
+                    "role": role,
+                    "mode": mode,
+                    "rights": rights,
+                    "attribution": attribution,
+                },
+                lambda: self.import_asset(path, name, role, mode, rights, attribution),
+            )
         path = Path(path).expanduser().resolve()
         if role not in (
             "image",
@@ -102,7 +124,116 @@ class Assets:
             )
         return self.asset(identity)
 
-    def update_asset(self, asset_id, rights=None, attribution=None):
+    def import_staged_asset(
+        self,
+        relative_path,
+        expected_device,
+        expected_inode,
+        expected_sha256,
+        name,
+        role,
+        identity=None,
+        provenance=None,
+    ):
+        """Atomically promote one verified MCP staging file into a managed asset.
+
+        The source is opened through Store's no-follow directory descriptor chain and
+        copied while that descriptor remains open.  A staging-path replacement cannot
+        redirect the copy, and no browser-visible path participates in the operation.
+        """
+        import stat
+
+        if role not in ("image", "video", "audio", "font", "example", "motion", "recipe"):
+            raise UnfoldError("INVALID_INPUT", "Unsupported asset role.")
+        suffix = Path(relative_path).suffix.lower()
+        if not re.fullmatch(r"\.[a-z0-9]{1,10}", suffix):
+            suffix = ".bin"
+        identity = identity or uid()
+        destination = Path("assets") / (identity + suffix)
+        checksum, size = hashlib.sha256(), 0
+        try:
+            with self.store.connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                try:
+                    existing = self.store.get(identity, db=db)
+                except UnfoldError:
+                    existing = None
+                if existing:
+                    if (
+                        existing.get("kind") != "asset"
+                        or existing.get("mcp_upload_id") != provenance
+                        or existing.get("sha256") != expected_sha256
+                    ):
+                        raise UnfoldError(
+                            "REQUEST_CONFLICT",
+                            "Upload promotion identity is already bound to different material.",
+                        )
+                    return existing
+                with self.store.open_relative(
+                    relative_path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                ) as source:
+                    before = os.fstat(source)
+                    if not stat.S_ISREG(before.st_mode) or (before.st_dev, before.st_ino) != (
+                        expected_device,
+                        expected_inode,
+                    ):
+                        raise UnfoldError("MATERIAL_CHANGED", "Upload staging file changed.")
+                    with self.store.open_relative(
+                        destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                    ) as target:
+                        while block := os.read(source, 1024 * 1024):
+                            checksum.update(block)
+                            size += len(block)
+                            write_all(target, block)
+                        os.fsync(target)
+                    after = os.fstat(source)
+                    if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                        after.st_size,
+                        after.st_mtime_ns,
+                        after.st_ctime_ns,
+                    ) or checksum.hexdigest() != expected_sha256:
+                        raise UnfoldError(
+                            "MATERIAL_CHANGED", "Upload changed while being imported."
+                        )
+                record = {
+                    "id": identity,
+                    "kind": "asset",
+                    "name": label(name),
+                    "role": role,
+                    "sha256": expected_sha256,
+                    "bytes": size,
+                    "suffix": suffix,
+                    "mime": mimetypes.guess_type("item" + suffix)[0] or "application/octet-stream",
+                    "rights": "unknown",
+                    "attribution": "",
+                    "ownership": "Unfold-managed",
+                    "relative_path": str(destination),
+                }
+                if provenance:
+                    record["mcp_upload_id"] = provenance
+                self.store.put("asset", record, db)
+                self.store.event(
+                    "asset_imported",
+                    identity,
+                    {"mode": "mcp-upload", "original_preserved": True},
+                    db,
+                )
+        except Exception:
+            try:
+                self.store.unlink_relative(destination)
+            except (OSError, UnfoldError):
+                pass
+            raise
+        return self.asset(identity)
+
+    def update_asset(self, asset_id, rights=None, attribution=None, request_id=None):
+        if request_id is not None:
+            return self._mutation(
+                "update_asset",
+                request_id,
+                {"asset_id": asset_id, "rights": rights, "attribution": attribution},
+                lambda: self.update_asset(asset_id, rights, attribution),
+            )
         record = self.store.get(asset_id, "asset")
         if rights is not None:
             if rights not in ("unknown", "redistributable", "restricted"):
@@ -123,7 +254,22 @@ class Assets:
     def packs(self):
         return self.store.list("pack")
 
-    def save_pack(self, name, guidance, asset_ids=None, pack_id=None, prerequisites=None):
+    def save_pack(
+        self, name, guidance, asset_ids=None, pack_id=None, prerequisites=None, request_id=None
+    ):
+        if request_id is not None:
+            return self._mutation(
+                "save_pack",
+                request_id,
+                {
+                    "name": name,
+                    "guidance": guidance,
+                    "asset_ids": asset_ids or [],
+                    "pack_id": pack_id,
+                    "prerequisites": prerequisites or [],
+                },
+                lambda: self.save_pack(name, guidance, asset_ids, pack_id, prerequisites),
+            )
         name = label(name)
         if not isinstance(guidance, dict) or len(json.dumps(guidance)) > 20000:
             raise UnfoldError("INVALID_INPUT", "Guidance must be a JSON object up to 20 KB.")
@@ -160,7 +306,14 @@ class Assets:
             self.store.event("pack_version_created", pack["id"], {"version_id": version["id"]}, db)
         return {**pack, "version": version}
 
-    def duplicate_pack(self, pack_id, name):
+    def duplicate_pack(self, pack_id, name, request_id=None):
+        if request_id is not None:
+            return self._mutation(
+                "duplicate_pack",
+                request_id,
+                {"pack_id": pack_id, "name": name},
+                lambda: self.duplicate_pack(pack_id, name),
+            )
         pack = self.store.get(pack_id, "pack")
         version = self.store.get(pack["current_version"], "pack_version")
         result = self.save_pack(
@@ -187,7 +340,14 @@ class Assets:
                     found.append({"id": r["id"], "kind": kind})
         return found
 
-    def remove(self, identity):
+    def remove(self, identity, request_id=None):
+        if request_id is not None:
+            return self._mutation(
+                "remove",
+                request_id,
+                {"identity": identity},
+                lambda: self.remove(identity),
+            )
         with self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             record = self.store.get(identity, db=db)
@@ -215,12 +375,10 @@ class Assets:
                 )
             removed, missing = [], []
             if record.get("relative_path"):
-                path = self.store.root / record["relative_path"]
-                if path.exists():
-                    path.unlink()
-                    removed.append(str(path))
+                if self.store.unlink_verified_relative(record["relative_path"], record["sha256"]):
+                    removed.append(record["relative_path"])
                 else:
-                    missing.append(str(path))
+                    missing.append(record["relative_path"])
             if record["kind"] == "artifact":
                 revision = self.store.get(record["revision_id"], "revision", db)
                 revision["artifacts"] = [i for i in revision["artifacts"] if i != identity]
@@ -236,7 +394,14 @@ class Assets:
             self.store.event("removed", identity, result, db)
         return result
 
-    def export_pack(self, version_id, destination):
+    def export_pack(self, version_id, destination, request_id=None):
+        if request_id is not None:
+            return self._mutation(
+                "export_pack",
+                request_id,
+                {"version_id": version_id, "destination": str(destination)},
+                lambda: self.export_pack(version_id, destination),
+            )
         version = self.store.get(version_id, "pack_version")
         pack = self.store.get(version["pack_id"], "pack")
         manifest = {
@@ -300,12 +465,13 @@ class Assets:
         )
         return {"path": str(destination), "manifest": manifest, "sha256": digest(destination)}
 
-    def inspect_pack(self, path):
-        """Validate everything before exposing contents. Never extract or execute ZIP code."""
+    def inspect_pack_stream(self, stream, *, sha256, size):
+        """Validate an already-held identity ZIP before exposing any of its bytes."""
         try:
-            if Path(path).stat().st_size > MAX_PACK + 1024 * 1024:
+            if size > MAX_PACK + 1024 * 1024:
                 raise ValueError("Archive exceeds 257 MiB on disk.")
-            with zipfile.ZipFile(path) as archive:
+            stream.seek(0)
+            with zipfile.ZipFile(stream) as archive:
                 entries = archive.infolist()
                 names = [e.filename for e in entries]
                 if (
@@ -370,14 +536,39 @@ class Assets:
                     files.append(a["file"])
                 if len(files) != len(set(files)) or set(names) != {"manifest.json", *files}:
                     raise ValueError("Archive contents do not match manifest.")
-                return {"manifest": m, "sha256": digest(path), "bytes": Path(path).stat().st_size}
+                return {"manifest": m, "sha256": sha256, "bytes": size}
         except (ValueError, KeyError, TypeError, zipfile.BadZipFile, RuntimeError) as exc:
             raise UnfoldError("INVALID_PACK", str(exc)) from None
 
-    def import_pack(self, path, expected_sha256=None, conflict="refuse"):
+    def inspect_pack(self, path):
+        """Validate everything before exposing contents. Never extract or execute ZIP code."""
+        path = Path(path)
+        with path.open("rb") as stream:
+            return self.inspect_pack_stream(
+                stream,
+                sha256=digest(path),
+                size=path.stat().st_size,
+            )
+
+    def import_pack_stream(self, stream, expected_sha256=None, conflict="refuse", request_id=None):
+        """Import from a held ZIP descriptor, never reopening an inspected pathname."""
+        if request_id is not None:
+            # The caller must already have retained the exact staged bytes. The hash is
+            # the durable payload identity; a retry never re-opens an ambient path.
+            return self._mutation(
+                "import_pack",
+                request_id,
+                {"sha256": expected_sha256, "conflict": conflict},
+                lambda: self.import_pack_stream(stream, expected_sha256, conflict),
+            )
         if conflict not in ("refuse", "copy"):
             raise UnfoldError("INVALID_INPUT", "Conflict policy must be refuse or copy.")
-        checked = self.inspect_pack(path)
+        stream.seek(0)
+        checksum, size = hashlib.sha256(), 0
+        while block := stream.read(1024 * 1024):
+            checksum.update(block)
+            size += len(block)
+        checked = self.inspect_pack_stream(stream, sha256=checksum.hexdigest(), size=size)
         if expected_sha256 and checked["sha256"] != expected_sha256:
             raise UnfoldError("SOURCE_CHANGED", "ZIP changed after inspection.")
         m = checked["manifest"]
@@ -401,15 +592,25 @@ class Assets:
                     )
             created = []
             try:
-                with zipfile.ZipFile(path) as archive:
+                stream.seek(0)
+                with zipfile.ZipFile(stream) as archive:
                     for a in m["assets"]:
                         identity = uid()
-                        relative = "assets/" + identity + a["suffix"]
-                        dest = self.store.root / relative
-                        dest.parent.mkdir(exist_ok=True)
-                        dest.write_bytes(archive.read(a["file"]))
-                        created.append(dest)
-                        if digest(dest) != a["sha256"]:
+                        relative = Path("assets") / (identity + a["suffix"])
+                        raw = archive.read(a["file"])
+                        with self.store.open_relative(
+                            relative, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                        ) as destination:
+                            write_all(destination, raw)
+                            os.fsync(destination)
+                        created.append((identity, relative))
+                        with self.store.open_relative(
+                            relative, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                        ) as source:
+                            copied = hashlib.file_digest(
+                                os.fdopen(os.dup(source), "rb"), "sha256"
+                            ).hexdigest()
+                        if copied != a["sha256"]:
                             raise UnfoldError("SOURCE_CHANGED", "ZIP changed while importing.")
                         record = {
                             k: a[k]
@@ -428,12 +629,12 @@ class Assets:
                             id=identity,
                             kind="asset",
                             ownership="Unfold-managed",
-                            relative_path=relative,
+                            relative_path=str(relative),
                             origin_id=a["id"],
                         )
                         self.store.put("asset", record, db)
                 pack_id, version_id = uid(), uid()
-                assets = [p.stem for p in created]
+                assets = [identity for identity, _ in created]
                 version = {
                     "id": version_id,
                     "kind": "pack_version",
@@ -470,7 +671,15 @@ class Assets:
                     self.store.put(kind, r, db)
                 self.store.event("pack_imported", pack_id, receipt, db)
             except Exception:
-                for p in created:
-                    p.unlink(missing_ok=True)
+                for _, relative in created:
+                    try:
+                        self.store.unlink_relative(relative)
+                    except UnfoldError:
+                        pass
                 raise
         return receipt
+
+    def import_pack(self, path, expected_sha256=None, conflict="refuse", request_id=None):
+        path = Path(path)
+        with path.open("rb") as stream:
+            return self.import_pack_stream(stream, expected_sha256, conflict, request_id)

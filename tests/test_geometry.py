@@ -157,3 +157,63 @@ def test_encoded_vector_draw_and_rigid_translation(tmp_path):
     assert near(after.getpixel((350, 450)), (240, 199, 110))
     assert near(after.getpixel((830, 280)), (240, 199, 110))
     assert metadata["duration"] == 5
+
+
+def orbital(**kwargs):
+    return Element(id="orbit", kind="path", x=300, y=100, width=440, height=440,
+                   closed=True, opacity=1, color="#ffffff",
+                   orbit=dict(center=[220,220], radius=180, angles=[0,80,190,270],
+                              marker_radius=5), **kwargs)
+
+
+def test_orbit_validation_and_static_geometry():
+    e = orbital()
+    assert geometry(e).count('class="orbit-marker"') == 4
+    for update in [dict(points=[(0,0),(10,10),(0,10)]), dict(closed=False),
+                   dict(kind="circle"), dict(orbit=dict(center=[20,20],radius=180,
+                                                      angles=[0,90,180]))]:
+        with pytest.raises(ValueError):
+            Element.model_validate({**e.model_dump(), **update})
+    for tweens in [[dict(target="orbit", at=0, orbit_angles=[0,90,180])],
+                   [dict(target="orbit", at=0, duration=2, orbit_angles=[0,90,180,270]),
+                    dict(target="orbit", at=1, duration=2, orbit_angles=[45,135,225,315])]]:
+        with pytest.raises(ValueError):
+            Scene(title="Invalid", duration=5, explanation="Invalid orbit",
+                  elements=[e], tweens=tweens)
+    with pytest.raises(ValueError, match="orbit path"):
+        Scene(title="Invalid", duration=5, explanation="Invalid target", elements=[vector()],
+              tweens=[dict(target="v", at=0, orbit_angles=[0,90,180])])
+
+
+@pytest.mark.skipif(not os.environ.get("UNFOLD_TEST_BACKEND"), reason="Needs renderer")
+def test_encoded_independent_orbit_corners_and_outline(tmp_path):
+    import math
+    backend = Backend(os.environ["UNFOLD_TEST_BACKEND"])
+    scene = Scene(title="Orbit test", duration=5, background="#000000",
+                  explanation="Independent corners follow arcs, outline follows corners",
+                  elements=[orbital()], stroke_animation="svg",
+                  tweens=[dict(target="orbit", at=0, duration=4,
+                               orbit_angles=[90,130,240,350], ease="none"),
+                          dict(target="orbit", at=4, duration=1, marker_opacity=0)])
+    source = tmp_path / "source"
+    backend.author(scene, source)
+    backend.render(source, tmp_path / "orbit.mp4")
+    frames = backend.frames(tmp_path / "orbit.mp4", [1,2,3], tmp_path / "frames")
+    for t, f in zip([1,2,3], frames):
+        image = Image.open(f['path']).convert('RGB')
+        pts = []
+        for start, end in zip([0,80,190,270], [90,130,240,350]):
+            angle = math.radians(start+(end-start)*t/4)
+            x,y = 520+180*math.cos(angle),320+180*math.sin(angle)
+            pts.append((x,y))
+            # Radius and marker location at intermediate time, not endpoint-only checks.
+            assert max(sum(image.getpixel((round(x)+dx,round(y)+dy)))
+                       for dx in range(-2,3) for dy in range(-2,3)) > 600
+        # Connected segment midpoints are rendered too.
+        for a,b in zip(pts,pts[1:]+pts[:1]):
+            x,y = round((a[0]+b[0])/2),round((a[1]+b[1])/2)
+            assert max(sum(image.getpixel((x+dx,y+dy)))
+                       for dx in range(-2,3) for dy in range(-2,3)) > 450
+    # Re-open stored source: orbit data survives the same model validation as retained work.
+    import json
+    assert Scene.model_validate(json.loads((source/'scene.json').read_text())) == scene

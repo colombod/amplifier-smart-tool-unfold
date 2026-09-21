@@ -80,6 +80,23 @@ comment and applies it to a different moment.
     remains isolated from credentials, library control APIs and unrelated projects.
     A simulated button inside an animation is not a user instruction to Unfold.
     Render errors and blocked resources are not human selections or approval.
+13. **The portable MCP App is the dashboard over another transport, not a second
+    product surface.** It starts from the same native document, styles and presentation
+    controller as the loopback dashboard. At equivalent inner viewport, selection,
+    retained library and theme, it exposes the same layout, controls, labels,
+    responsive behavior and library-owned workflow: project rename; Review, Library
+    and Export navigation; single/compare review; drafts, notes, jobs and cancellation;
+    packs, assets, delivery and retained outputs. The transport boundary may report a
+    concrete host capability failure (for example, unavailable MCP resource reads);
+    it must not silently replace the interaction with a reduced page, a placeholder or
+    a new authority/grant form. Creation and authorization remain callable public
+    operations, not dashboard controls, and displaying work never grants authority.
+14. **Portable bytes remain scoped and explicit.** The MCP presentation transfers only
+    bounded, integrity-checked retained artifacts, assets, inspected pack previews and
+    prepared downloads through opaque references. Browser filenames are labels, never
+    server paths. It does not expose a loopback URL, arbitrary filesystem reads,
+    symlink redirects or a relaxed dashboard authentication policy. A documented view
+    size limit is a presentation limitation, not a claim about every host.
 
 ## Proposed acceptance checks
 
@@ -95,6 +112,14 @@ comment and applies it to a different moment.
   reconnect with missing event history. Pending needs remain visible.
 - Manage identity versions and ZIP exchange through UI and library with matching
   effects. Verify dependency-aware removal and exact-revision export.
+- Render the same populated deterministic library through the native dashboard and an
+  independent official AppBridge at desktop and narrow viewport under Light, Dark and
+  System/partial host-context updates. Compare native DOM/control inventory, computed
+  palette, geometry and pinned-media screenshots. Exercise each visible library,
+  delivery and output operation through the shared public state and byte checks.
+- Exercise an MCP host without the required resource capability and a retained item
+  above the documented view limit. Each must identify the actual blocked operation
+  while preserving selection/drafts and without supplying a localhost fallback.
 - Stop owned resources without deleting retained work or stopping unrelated host
   services; reject stale submissions and reopen deliberately.
 
@@ -106,3 +131,11 @@ rendered thumbnails alone do not establish these interaction promises.
 Framework, layout, annotation mechanism, visual element selector scheme, polling
 versus events, player implementation and service process model. Support for remote
 collaborative editing or a complete nonlinear editor is not implied.
+
+## Changelog
+
+- **2026-09-19** — Added the approved exact native dashboard/MCP App parity direction:
+  one canonical presentation and controller with a small transport boundary, full
+  existing dashboard workflow, no display-originated authority, and bounded opaque
+  portable byte transfer. This is a DRAFT direction update, not a lock or an
+  implementation acceptance claim.

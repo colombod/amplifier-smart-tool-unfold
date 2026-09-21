@@ -85,6 +85,13 @@ the caller believing nothing changed.
     when the changed dependency is supplied or detected; it does not claim to monitor
     files or external systems it cannot observe. Adopting or exporting new work does
     not silently replace a caller's selected downstream revision.
+13. **Presentation transports preserve caller semantics.** The local dashboard and
+    portable MCP App call the same library behavior and retain exact revision,
+    operation and retry identities. A portable adapter may transfer bounded,
+    integrity-checked retained bytes using opaque resource/download references, but
+    never exposes server paths or broadens filesystem, model, disclosure or deletion
+    authority. A lost transport response is reconciled from retained public state
+    before retrying a mutation or model operation.
 
 ## Proposed acceptance checks
 
@@ -108,3 +115,10 @@ No executable acceptance evidence exists yet.
 Capability signatures, identity encoding, event transport, retry windows, retention
 duration, background execution model and a cross-tool storyboard or timeline schema.
 The public promises do not require a general production orchestrator.
+
+## Changelog
+
+- **2026-09-19** — Clarified the approved native dashboard/MCP App parity direction:
+  alternate presentation transports preserve the same library semantics, exact
+  identities and authority boundaries while using opaque bounded byte transfer. DRAFT
+  only; no behavior is claimed by this amendment.

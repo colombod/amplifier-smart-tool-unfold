@@ -47,7 +47,17 @@ def geometry(element):
         radius = max(0, (min(e.width, e.height) - e.stroke_width) / 2)
         shape = f'<circle cx="{e.width / 2}" cy="{e.height / 2}" r="{radius}" {attributes}/>'
     else:
-        path = "M " + " L ".join(f"{x} {y}" for x, y in e.points)
+        points = e.points
+        if e.orbit:
+            cx, cy = e.orbit.center
+            points = [(cx + e.orbit.radius * math.cos(math.radians(a)),
+                       cy + e.orbit.radius * math.sin(math.radians(a)))
+                      for a in e.orbit.angles]
+            head = "".join(
+                f'<circle class="orbit-marker" cx="{x}" cy="{y}" '
+                f'r="{e.orbit.marker_radius}" fill="{e.color}"/>' for x, y in points
+            )
+        path = "M " + " L ".join(f"{x} {y}" for x, y in points)
         shape = f'<path d="{path}{" Z" if e.closed else ""}" {attributes}/>'
         if e.arrow_end:
             (ax, ay), (bx, by) = e.points[-2:]
@@ -70,7 +80,11 @@ def geometry(element):
 
 def run(argv, timeout=180):
     # Renderer processes have no provider credentials, user configuration or telemetry.
-    env = {key: os.environ[key] for key in ("PATH", "TMPDIR", "SYSTEMROOT") if key in os.environ}
+    env = {
+        key: os.environ[key]
+        for key in ("PATH", "TMPDIR", "TMP", "TEMP", "SYSTEMROOT")
+        if key in os.environ
+    }
     env.update(HYPERFRAMES_NO_TELEMETRY="1", DO_NOT_TRACK="1")
     try:
         result = subprocess.run(argv, capture_output=True, text=True, env=env, timeout=timeout)
@@ -86,8 +100,11 @@ def run(argv, timeout=180):
 class Backend:
     def __init__(self, root):
         self.root = Path(root).expanduser().resolve()
-        self.cli = self.root / "node_modules/.bin/hyperframes"
+        self.cli = self.root / "node_modules/hyperframes/bin/hyperframes.mjs"
         self.gsap = self.root / "node_modules/gsap/dist/gsap.min.js"
+
+    def _run_cli(self, arguments, timeout=240):
+        return run(["node", str(self.cli), *arguments], timeout=timeout)
 
     def doctor(self):
         versions = {}
@@ -164,9 +181,35 @@ class Backend:
                 f'border-radius:{e.radius}px;padding:{padding}">{label}{text}</div>'
             )
         lines = []
-        for tween in scene.tweens:
-            props = tween.model_dump(exclude_none=True, exclude={"target", "at", "draw"})
-            if tween.draw is None or set(props) - {"duration", "ease"}:
+        for e in scene.elements:
+            if e.orbit is None:
+                continue
+            orbit = e.orbit
+            angles = {f"a{i}": a for i, a in enumerate(orbit.angles)}
+            lines.append(
+                f"const orbit_{e.id}={json.dumps(angles)};"
+                f"function update_{e.id}(){{"
+                f"const e=document.getElementById({json.dumps(e.id)});"
+                f"const p=Array.from({{length:{len(orbit.angles)}}},(_,i)=>{{"
+                f"const a=orbit_{e.id}['a'+i]*Math.PI/180;"
+                f"return [{orbit.center[0]}+{orbit.radius}*Math.cos(a),"
+                f"{orbit.center[1]}+{orbit.radius}*Math.sin(a)];}});"
+                "e.querySelector('.trace').setAttribute('d','M '+p.map(v=>v.join(' ')).join(' L ')+' Z');"
+                "e.querySelectorAll('.orbit-marker').forEach((m,i)=>{"
+                "m.setAttribute('cx',p[i][0]);m.setAttribute('cy',p[i][1]);});}"
+            )
+        for tween in sorted(scene.tweens, key=lambda t: t.at):
+            props = tween.model_dump(exclude_none=True, exclude={"target", "at", "draw", "orbit_angles", "marker_opacity"})
+            if tween.orbit_angles is not None:
+                orbit_props = {f"a{i}": a for i, a in enumerate(tween.orbit_angles)}
+                orbit_props.update(duration=tween.duration, ease=tween.ease)
+                encoded = json.dumps(orbit_props)[:-1] + f',"onUpdate":update_{tween.target}' + "}"
+                lines.append(f'tl.to(orbit_{tween.target},{encoded},{tween.at});')
+            if tween.marker_opacity is not None:
+                markers = dict(opacity=tween.marker_opacity, duration=tween.duration, ease=tween.ease)
+                lines.append(f'tl.to("#{tween.target} .orbit-marker",{json.dumps(markers)},{tween.at});')
+            if (tween.draw is None and tween.orbit_angles is None and
+                    tween.marker_opacity is None) or set(props) - {"duration", "ease"}:
                 lines.append(f'tl.to("#{tween.target}",{json.dumps(props)},{tween.at});')
             if tween.draw is not None:
                 trace = {
@@ -280,9 +323,8 @@ window.__timelines.unfold=tl;
                     "SOURCE_CHANGED",
                     "Generated source was externally modified; no code was executed or replaced.",
                 )
-        run(
+        self._run_cli(
             [
-                str(self.cli),
                 "render",
                 str(directory),
                 "--output",

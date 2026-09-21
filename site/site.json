@@ -1,0 +1,55 @@
+{
+  "kind": "tool",
+  "key": "unfold",
+  "name": "Unfold",
+  "accent": "#46695e",
+  "title": "Unfold | Amplifier Smart Tools",
+  "promise": "Make an idea clear through motion.",
+  "description": "Turn a technical explanation into an animation. Describe the relationships that matter, watch the result, and refine the exact moment that needs to be clearer.",
+  "image": "docs/images/unfold-studio.png",
+  "alt": "Unfold review dashboard playing the From spark to system animation with retained project and revision controls.",
+  "caption": "The real Unfold review dashboard showing From spark to system, a 28-second animation created through its embedded agent.",
+  "width": 1280,
+  "height": 720,
+  "flow_title": "Explain it. Watch it. Make it clearer.",
+  "flow_intro": "Use geometry, images, text, and movement to make a system or idea easier to understand.",
+  "steps": [
+    [
+      "Bring the explanation.",
+      "Describe the audience, the idea, and the real relationships between components. Add visual guidance and supplied assets."
+    ],
+    [
+      "Watch and compare.",
+      "Review a revision on its own or compare two with synchronized playback. Earlier revisions remain available."
+    ],
+    [
+      "Refine and reuse.",
+      "Leave feedback on a moment or interval. Share visual guidance and eligible assets in identity packs, then deliver a video or transparent overlay."
+    ]
+  ],
+  "detail_title": "Keep the idea and its history.",
+  "details": [
+    [
+      "Review the moment.",
+      "Attach feedback to the point that needs work. Authorized refinement can run from the workspace without losing the revision you are viewing."
+    ],
+    [
+      "Carry a visual identity.",
+      "Retain guidance and reusable assets in identity packs. Share packs by ZIP so another project can begin with the same visual language."
+    ],
+    [
+      "Deliver for the next step.",
+      "Export H.264 MP4 or silent ProRes 4444 overlays with transparency. Import audio when the work needs it."
+    ]
+  ],
+  "prompt": "Use Unfold to animate how a request moves from a caller through tools and back as an artifact. Read unfold --help, help me configure the renderer and model, and open the animation for review. Use motion and geometry with minimal text.",
+  "install": "uv tool install \"amplifier-smart-tool-unfold[smart] @ git+https://github.com/robotdad/amplifier-smart-tool-unfold\"\nunfold --help",
+  "prerequisites": "Python 3.12+, Git, uv, Node.js, and FFmpeg with FFprobe. Follow the tool guide to prepare the pinned renderer dependencies.",
+  "model_note": "Creative work needs separately configured OpenAI, Anthropic, or Gemini access with a vision-capable model. Managing retained work and rendering existing compositions need no model.",
+  "guide": "src/unfold/SMART_TOOL.md",
+  "related": [
+    "stories",
+    "showrun",
+    "possibly"
+  ]
+}

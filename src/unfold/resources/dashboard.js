@@ -13,9 +13,52 @@ let state,
   packId,
   packVersionId,
   draftTimer,
+  viewTimer,
   draftSequence = Date.now(),
+  draftGeneration = 0,
+  draftDirty = false,
+  selectionGeneration = 0,
+  viewVersion = 0,
+  pollTimer,
+  destroyed = false,
   submissionId = null,
-  loadedDraft = null;
+  submissionPayload = null,
+  submissionPending = false,
+  commentPayload = null,
+  commentPending = false,
+  draftConflict = null,
+  loadedDraft = null,
+  loadedDraftSignature = null,
+  playerSignature = null,
+  deliverySignature = null,
+  librarySignature = null,
+  statusSignature = null,
+  playbackIntent = { revision_id: null, at: 0, playing: false, version: 0 },
+  suppressDraftConflictNotice = false;
+const acknowledgedIntents = new Set();
+// The native dashboard owns presentation and interaction.  The optional MCP App
+// supplies this narrow adapter before this script runs; the loopback dashboard
+// continues to use same-origin HTTP unchanged.
+const transport = window.unfoldTransport;
+const requestId = () =>
+  crypto.randomUUID?.().replaceAll("-", "") ||
+  Array.from(crypto.getRandomValues(new Uint8Array(16)), (value) =>
+    value.toString(16).padStart(2, "0"),
+  ).join("");
+const remembered = (key) => {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+};
+const remember = (key, value) => {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Sandboxed MCP Apps have no origin storage. The retained library still owns work.
+  }
+};
 const notice = (m) => ($("notice").textContent = m);
 const guarded =
   (fn) =>
@@ -27,6 +70,7 @@ const guarded =
     }
   };
 async function api(path, data) {
+  if (transport?.api) return transport.api(path, data);
   const r = await fetch(
     path,
     data === undefined
@@ -38,19 +82,92 @@ async function api(path, data) {
         },
   );
   const v = await r.json();
-  if (!r.ok)
-    throw Error(
+  if (!r.ok) {
+    const error = Error(
       typeof v.error === "string"
         ? v.error
         : v.error?.message || JSON.stringify(v),
     );
+    error.definitive = true;
+    throw error;
+  }
   return v;
 }
-const call = (capability, arguments) => api("/call", { capability, arguments });
+const call = (capability, args) => api("/call", { capability, arguments: args });
+function source(path) {
+  return transport?.mediaUrl ? transport.mediaUrl(path) : Promise.resolve(path);
+}
+function releaseElementMedia(element) {
+  const url = element?.dataset?.unfoldMediaUrl;
+  if (url && transport?.releaseMedia) transport.releaseMedia(url);
+  if (element?.dataset) delete element.dataset.unfoldMediaUrl;
+}
+function releaseMediaWithin(root) {
+  root?.querySelectorAll?.("[data-unfold-media-url]").forEach(releaseElementMedia);
+}
+function setSource(element, path, generation = selectionGeneration) {
+  releaseElementMedia(element);
+  const requested = path;
+  Promise.resolve(source(path))
+    .then((url) => {
+      if (
+        !destroyed &&
+        generation === selectionGeneration &&
+        element.isConnected &&
+        element.dataset.unfoldSource === requested
+      ) {
+        element.src = url;
+        element.dataset.unfoldMediaUrl = url;
+        transport?.retainMedia?.(url);
+      } else if (transport?.releaseMedia) transport.releaseMedia(url);
+    })
+    .catch((error) => {
+      if (
+        !destroyed &&
+        generation === selectionGeneration &&
+        element.isConnected &&
+        element.dataset.unfoldSource === requested
+      ) {
+        element.removeAttribute("src");
+        notice(error.message);
+      }
+    });
+  element.dataset.unfoldSource = requested;
+}
 const current = () => state?.revisions.find((r) => r.id === revisionId);
 const project = () => state?.projects.find((p) => p.id === projectId);
 const revisions = () =>
   state?.revisions.filter((r) => r.project_id === projectId) || [];
+const draftSnapshot = () => ({
+  revision_id: revisionId,
+  text: $("feedback").value,
+  at: Number($("at").value),
+  end: $("end").value === "" ? null : Number($("end").value),
+  generation: draftGeneration,
+  sequence: ++draftSequence,
+});
+function sameDraft(snapshot, saved) {
+  return (
+    saved?.revision_id === snapshot.revision_id &&
+    saved?.text === snapshot.text &&
+    Number(saved?.at) === Number(snapshot.at) &&
+    (saved?.end ?? null) === (snapshot.end ?? null) &&
+    Number(saved?.sequence) === Number(snapshot.sequence)
+  );
+}
+function selectedArtifact() {
+  return current()?.resolved_artifacts?.[0]?.id || null;
+}
+function publishContext() {
+  transport?.publishContext?.({
+    revision_id: revisionId || null,
+    artifact_id: selectedArtifact(),
+    playback_seconds: Number($("scrub").value),
+    feedback_draft: $("feedback").value.slice(0, 2000),
+    feedback_draft_truncated: $("feedback").value.length > 2000,
+    draft_is_authority: false,
+  });
+}
 function option(select, id, name) {
   const o = E("option", name);
   o.value = id;
@@ -97,8 +214,70 @@ function revisionName(r) {
     r.id.slice(0, 8)
   );
 }
+function signature(value) {
+  return JSON.stringify(value);
+}
+function playerStateSignature() {
+  return signature({
+    projectId,
+    revisionId,
+    compareId,
+    comparison,
+    selected: (comparison ? [compareId, revisionId] : [revisionId]).map((id) => {
+      const revision = state?.revisions.find((item) => item.id === id);
+      const artifact = revision?.resolved_artifacts?.[0];
+      return [id, artifact?.id, artifact?.sha256, artifact?.integrity];
+    }),
+  });
+}
+function deliveryStateSignature() {
+  return signature(
+    (state?.outputs || [])
+      .filter((output) => output.revision_id === revisionId)
+      .map((output) => [
+        output.id,
+        output.name,
+        output.sha256,
+        output.integrity,
+        output.delivery_id,
+      ]),
+  );
+}
+function setPlaybackIntent(view) {
+  const at = Number(view?.at);
+  playbackIntent = {
+    revision_id: view?.revision_id || revisionId,
+    at: Number.isFinite(at) ? at : 0,
+    playing: Boolean(view?.playing),
+    version: Number(view?.version || viewVersion || 0),
+  };
+  if (playbackIntent.revision_id === revisionId) {
+    $("scrub").value = playbackIntent.at;
+    $("time").textContent = playbackIntent.at.toFixed(2) + "s";
+    syncPlayerPlayback();
+  }
+}
+function syncVideoPlayback(video, generation = selectionGeneration) {
+  if (
+    generation !== selectionGeneration ||
+    !video.isConnected ||
+    playbackIntent.revision_id !== revisionId ||
+    !Number.isFinite(video.duration)
+  )
+    return;
+  const at = Math.min(playbackIntent.at, video.duration);
+  if (Math.abs(video.currentTime - at) > 0.04) video.currentTime = at;
+  if (playbackIntent.playing && video.paused) video.play().catch(() => {});
+  if (!playbackIntent.playing && !video.paused) video.pause();
+}
+function syncPlayerPlayback() {
+  document
+    .querySelectorAll("#players video")
+    .forEach((video) => syncVideoPlayback(video));
+}
 function drawPlayers() {
-  const held = Number($("scrub").value);
+  const generation = selectionGeneration;
+  releaseMediaWithin($("players"));
   $("players").replaceChildren();
   $("players").classList.toggle("compare", comparison);
   $("single").classList.toggle("on", !comparison);
@@ -156,12 +335,18 @@ function drawPlayers() {
                 other.currentTime = time;
             });
         };
-        v.src = "/media/" + a.id;
+        setSource(v, "/media/" + a.id, generation);
         v.onloadedmetadata = () => {
-          v.currentTime = Math.min(held, v.duration);
+          syncVideoPlayback(v, generation);
         };
         v.ontimeupdate = () => {
           if (!comparison || index === 1) {
+            if (playbackIntent.revision_id === revisionId && !v.seeking)
+              playbackIntent = {
+                ...playbackIntent,
+                at: v.currentTime,
+                playing: !v.paused,
+              };
             if (comparison && !v.paused)
               document.querySelectorAll("#players video").forEach((other) => {
                 if (
@@ -195,19 +380,85 @@ function drawPlayers() {
     : "";
   loadDraft();
   drawStatus();
+  publishContext();
+  playerSignature = playerStateSignature();
 }
 async function chooseRevision(id) {
-  await saveDraft();
-  revisionId = id;
-  localStorage.setItem("unfold.revision", id);
-  submissionId = null;
+  const target = state.revisions.find((revision) => revision.id === id);
+  if (!target) throw Error("That retained revision is no longer available.");
+  await flushCurrentDraft();
+  selectionGeneration++;
+  revisionId = target.id;
+  projectId = target.project_id;
+  remember("unfold.revision", target.id);
   loadedDraft = null;
+  loadedDraftSignature = null;
+  compareId = project()?.revisions.find((candidate) => candidate !== revisionId) || revisionId;
+  $("title").textContent = project()?.name || "No projects yet";
   drawPlayers();
+  drawDelivery();
+  await saveReviewView();
+}
+async function flushCurrentDraft() {
+  while (revisionId) {
+    const before = draftSnapshot();
+    const acknowledged = await saveDraft(before);
+    if (!acknowledged)
+      throw Error(
+        "A shared draft won this save. Your local text remains visible; edit it to save a new draft before changing review.",
+      );
+    // Keep taking exact old-target snapshots until no input arrived during any
+    // awaited save. Navigation never turns that input into a new-target draft.
+    if (
+      before.generation === draftGeneration &&
+      before.text === $("feedback").value &&
+      before.at === Number($("at").value) &&
+      before.end === ($("end").value === "" ? null : Number($("end").value))
+    )
+      return;
+  }
 }
 function loadDraft() {
-  if (loadedDraft === revisionId) return;
-  loadedDraft = revisionId;
   const d = state.drafts.find((d) => d.revision_id === revisionId);
+  const conflict = (state.draft_conflicts || [])
+    .filter((item) => item.status === "open" && item.revision_id === revisionId)
+    .at(-1);
+  if (conflict && (!draftConflict || draftConflict.id !== conflict.id)) {
+    draftConflict = conflict;
+    loadedDraft = revisionId;
+    loadedDraftSignature = "conflict:" + conflict.id;
+    $("feedback").value = conflict.local.text;
+    $("at").value = conflict.local.at;
+    $("end").value = conflict.local.end ?? "";
+    draftSequence = Math.max(
+      Date.now(),
+      (conflict.local.sequence || 0) + 1,
+      (conflict.remote.sequence || 0) + 1,
+    );
+    draftGeneration++;
+    draftDirty = true;
+    $("draftStatus").textContent =
+      "Shared draft conflict · local changes remain unsaved. Edit to save a new draft.";
+    return;
+  }
+  const nextSignature = signature([
+    revisionId,
+    d?.text || "",
+    d?.at || 0,
+    d?.end ?? null,
+    d?.sequence || 0,
+    d?.submitted_job || null,
+  ]);
+  if (loadedDraft === revisionId && loadedDraftSignature === nextSignature) return;
+  if (loadedDraft === revisionId && draftDirty) {
+    // A caller's newer draft is visible as a real conflict, never silently
+    // overwritten beneath current typing.
+    if (!suppressDraftConflictNotice)
+      notice("A shared draft changed while you have unsaved input.");
+    return;
+  }
+  loadedDraft = revisionId;
+  loadedDraftSignature = nextSignature;
   $("feedback").value = d?.text || "";
   $("at").value = d?.at || 0;
   $("end").value = d?.end ?? "";
@@ -215,60 +466,203 @@ function loadDraft() {
     ? "Submitted · " + d.submitted_job.slice(0, 8)
     : "Unsubmitted draft";
   draftSequence = Math.max(Date.now(), (d?.sequence || 0) + 1);
+  draftGeneration++;
+  draftDirty = false;
+  draftConflict = null;
 }
-async function saveDraft() {
+async function saveDraft(body = draftSnapshot()) {
   clearTimeout(draftTimer);
-  if (!revisionId) return;
-  const body = {
-    revision_id: revisionId,
-    text: $("feedback").value,
-    at: Number($("at").value),
-    end: $("end").value === "" ? null : Number($("end").value),
-    sequence: ++draftSequence,
-  };
-  $("draftStatus").textContent = "Saving…";
-  const saved = await api("/draft", body);
+  if (!body.revision_id) return;
+  if (body.revision_id === revisionId && body.generation === draftGeneration)
+    $("draftStatus").textContent = "Saving…";
+  const saved = await api("/draft", {
+    revision_id: body.revision_id,
+    text: body.text,
+    at: body.at,
+    end: body.end,
+    sequence: body.sequence,
+    resolve_conflict_id: draftConflict?.id || null,
+  });
   state.drafts = state.drafts
     .filter((d) => d.revision_id !== body.revision_id)
     .concat(saved);
-  if (revisionId === body.revision_id)
-    $("draftStatus").textContent = saved.submitted_job
-      ? "Submitted · " + saved.submitted_job.slice(0, 8)
-      : "Draft retained · not submitted";
+  const acknowledged = sameDraft(body, saved);
+  if (
+    revisionId === body.revision_id &&
+    body.generation === draftGeneration &&
+    $("feedback").value === body.text &&
+    Number($("at").value) === Number(body.at) &&
+    ($("end").value === "" ? null : Number($("end").value)) === (body.end ?? null)
+  ) {
+    if (acknowledged) {
+      $("draftStatus").textContent = saved.submitted_job
+        ? "Submitted · " + saved.submitted_job.slice(0, 8)
+        : "Draft retained · not submitted";
+      draftDirty = false;
+      if (draftConflict) {
+        state.draft_conflicts = (state.draft_conflicts || []).filter(
+          (item) => item.id !== draftConflict.id,
+        );
+        draftConflict = null;
+      }
+    } else {
+      const conflict = {
+        id: draftConflict?.id || requestId(),
+        revision_id: body.revision_id,
+        local: {
+          revision_id: body.revision_id,
+          text: body.text,
+          at: body.at,
+          end: body.end,
+          sequence: body.sequence,
+        },
+        remote: saved,
+        status: "open",
+      };
+      await call("record-draft-conflict", {
+        revision_id: body.revision_id,
+        local: conflict.local,
+        remote: saved,
+        conflict_id: conflict.id,
+      });
+      draftConflict = conflict;
+      state.draft_conflicts = (state.draft_conflicts || [])
+        .filter((item) => item.id !== conflict.id)
+        .concat(conflict);
+      draftDirty = true;
+      $("draftStatus").textContent =
+        "Shared draft conflict · local changes remain unsaved. Edit to save a new draft.";
+    }
+  }
+  return acknowledged;
+}
+async function saveReviewView(flush = false) {
+  if (!revisionId || (destroyed && !flush)) return;
+  const payload = {
+    revision_id: revisionId,
+    artifact_id: selectedArtifact(),
+    at: Number($("scrub").value),
+    playing: [...$("players").querySelectorAll("video")].some((video) => !video.paused),
+    expected_version: viewVersion,
+    theme: document.documentElement.dataset.theme || "system",
+  };
+  try {
+    const saved = await api("/view", payload);
+    viewVersion = saved.version;
+    publishContext();
+  } catch (error) {
+    if (error.definitive) {
+      refresh().catch(() => {});
+      return;
+    }
+    throw error;
+  }
 }
 ["feedback", "at", "end"].forEach(
   (id) =>
     ($(id).oninput = () => {
-      submissionId = null;
+      if (!submissionPayload) {
+        submissionId = null;
+        submissionPayload = null;
+      }
+      if (!commentPayload) commentPayload = null;
+      draftGeneration++;
+      draftDirty = true;
       $("draftStatus").textContent = "Unsaved changes";
       clearTimeout(draftTimer);
-      draftTimer = setTimeout(guarded(saveDraft), 350);
+      // A retained Apply has immutable feedback already. Later typing is a
+      // distinct unsaved draft, not an implicit save that can race its exact
+      // receipt retry and replace the user-visible outcome.
+      if (!submissionPayload) draftTimer = setTimeout(guarded(saveDraft), 350);
     }),
 );
 $("apply").onclick = guarded(async () => {
-  await saveDraft();
-  submissionId ??= crypto.randomUUID().replaceAll("-", "");
-  const result = await api("/refine", {
-    revision_id: revisionId,
-    text: $("feedback").value,
-    at: Number($("at").value),
-    end: $("end").value === "" ? null : Number($("end").value),
-    request_id: submissionId,
-  });
+  const retrying = Boolean(submissionPayload);
+  const action =
+    submissionPayload ||
+    {
+      revision_id: revisionId,
+      text: $("feedback").value,
+      at: Number($("at").value),
+      end: $("end").value === "" ? null : Number($("end").value),
+      request_id: submissionId || requestId(),
+    };
+  submissionId = action.request_id;
+  submissionPayload = action;
+  const snapshot = {
+    ...action,
+    generation: draftGeneration,
+    sequence: ++draftSequence,
+  };
+  try {
+    if (!retrying) {
+      await saveDraft(snapshot);
+      await call("retain-refinement-intent", action);
+    }
+  } catch (error) {
+    if (error.definitive) {
+      submissionId = null;
+      submissionPayload = null;
+    }
+    throw error;
+  }
+  submissionPending = true;
+  let result;
+  try {
+    // Never reread mutable presenter state after an await: this exact action
+    // survives navigation, remount recovery, and a lost response.
+    result = await api("/refine", action);
+    await call("acknowledge-refinement-intent", { request_id: action.request_id });
+    acknowledgedIntents.add(action.request_id);
+    submissionId = null;
+    submissionPayload = null;
+  } catch (error) {
+    if (error.definitive) {
+      submissionId = null;
+      submissionPayload = null;
+    }
+    throw error;
+  } finally {
+    submissionPending = false;
+  }
   $("draftStatus").textContent = "Submitted · " + result.id.slice(0, 8);
   notice(
     "Feedback accepted · " +
       result.id.slice(0, 8) +
       ". Your viewed revision stays selected.",
   );
-  await refresh();
+  suppressDraftConflictNotice = true;
+  try {
+    await refresh();
+  } finally {
+    suppressDraftConflictNotice = false;
+  }
 });
 $("note").onclick = guarded(async () => {
-  await saveDraft();
-  const n = await api("/feedback", {
-    revision_id: revisionId,
-    text: $("feedback").value,
-  });
+  const snapshot = draftSnapshot();
+  await saveDraft(snapshot);
+  const action =
+    commentPayload ||
+    {
+      revision_id: snapshot.revision_id,
+      text: snapshot.text,
+      request_id: requestId(),
+    };
+  commentPayload = action;
+  await call("retain-feedback-intent", action);
+  let n;
+  commentPending = true;
+  try {
+    n = await api("/feedback", action);
+    await call("acknowledge-feedback-intent", { request_id: action.request_id });
+    acknowledgedIntents.add(action.request_id);
+    commentPayload = null;
+  } catch (error) {
+    if (error.definitive) commentPayload = null;
+    throw error;
+  } finally {
+    commentPending = false;
+  }
   notice("Comment retained · " + n.id.slice(0, 8) + ". No refinement started.");
   await refresh();
 });
@@ -286,33 +680,50 @@ $("compare").onclick = () => {
 };
 $("latest").onclick = guarded(() => chooseRevision(project().current_revision));
 $("project").onchange = guarded(async () => {
-  await saveDraft();
-  projectId = $("project").value;
-  revisionId = project().current_revision;
-  localStorage.setItem("unfold.revision", revisionId);
+  const target = state.projects.find((project) => project.id === $("project").value);
+  if (!target?.current_revision) throw Error("This project has no retained revision.");
+  await chooseRevision(target.current_revision);
   $("scrub").value = 0;
-  compareId = project().revisions.at(-2) || revisionId;
-  loadedDraft = null;
-  $("title").textContent = project().name;
-  drawPlayers();
 });
 $("play").onclick = guarded(async () => {
+  setPlaybackIntent({
+    revision_id: revisionId,
+    at: Number($("scrub").value),
+    playing: true,
+    version: viewVersion,
+  });
   const videos = [...$("players").querySelectorAll("video")];
   for (const v of videos) {
     v.currentTime = Math.min(Number($("scrub").value), v.duration);
     await v.play();
   }
 });
-$("pause").onclick = () =>
+$("pause").onclick = () => {
+  setPlaybackIntent({
+    revision_id: revisionId,
+    at: Number($("scrub").value),
+    playing: false,
+    version: viewVersion,
+  });
   document.querySelectorAll("#players video").forEach((v) => v.pause());
+};
 $("scrub").oninput = () => {
+  setPlaybackIntent({
+    revision_id: revisionId,
+    at: Number($("scrub").value),
+    playing: false,
+    version: viewVersion,
+  });
   document.querySelectorAll("#players video").forEach((v) => {
     v.pause();
     v.currentTime = Number($("scrub").value);
   });
   $("time").textContent = Number($("scrub").value).toFixed(2) + "s";
+  clearTimeout(viewTimer);
+  viewTimer = setTimeout(() => guarded(saveReviewView)(), 200);
 };
 function drawStatus() {
+  const evidenceOpen = $("history").querySelector("details")?.open || false;
   const a = state.authorities.find((a) => a.project_id === projectId);
   $("allowance").textContent = a
     ? `${a.remaining} authorized refinements remaining · ${a.grant.provider} / ${a.grant.model}`
@@ -338,7 +749,7 @@ function drawStatus() {
       if (["queued", "running", "cancelling"].includes(j.status))
         e.append(
           button("Cancel", async () => {
-            await api("/cancel", { job_id: j.id });
+            await api("/cancel", { job_id: j.id, request_id: requestId() });
             await refresh();
           }),
         );
@@ -348,6 +759,7 @@ function drawStatus() {
     });
   $("history").replaceChildren();
   const detail = E("details");
+  detail.open = evidenceOpen;
   detail.append(
     E("summary", "Revision evidence"),
     E("pre", JSON.stringify(current(), null, 2)),
@@ -378,6 +790,15 @@ function drawStatus() {
       );
       $("history").append(d);
     });
+  statusSignature = signature({
+    projectId,
+    revisionId,
+    authority: state.authorities.find((a) => a.project_id === projectId),
+    jobs: state.jobs.filter((job) => job.project_id === projectId),
+    events: state.events.filter(
+      (event) => event.subject === projectId || event.data?.project_id === projectId,
+    ),
+  });
 }
 function modal(title) {
   $("dialogBody").replaceChildren();
@@ -398,7 +819,7 @@ function rename(id, name) {
   body.append(
     input,
     button("Save", async () => {
-      await api("/rename", { id, name: input.value });
+      await api("/rename", { id, name: input.value, request_id: requestId() });
       $("dialog").close();
       await refresh();
       drawLibrary();
@@ -411,23 +832,23 @@ function preview(a, url) {
   let e;
   if (a.mime?.startsWith("image/") && a.mime !== "image/svg+xml") {
     e = E("img");
-    e.src = url;
+    setSource(e, url);
     e.alt = a.name;
   } else if (a.mime?.startsWith("audio/")) {
     e = E("audio");
     e.controls = true;
-    e.src = url;
+    setSource(e, url);
   } else if (a.mime?.startsWith("video/")) {
     e = E("video");
     e.controls = true;
     e.preload = "metadata";
-    e.src = url;
+    setSource(e, url);
   } else {
     e = E("div", a.role === "font" ? "Aa Bb Cc 123" : a.role, "empty");
     if (a.role === "font") {
       const family = "asset" + a.id;
-      new FontFace(family, "url(" + url + ")")
-        .load()
+      source(url)
+        .then((resolved) => new FontFace(family, "url(" + resolved + ")").load())
         .then((f) => {
           document.fonts.add(f);
           e.style.fontFamily = family;
@@ -482,6 +903,7 @@ function assetDetails(a) {
         asset_id: a.id,
         rights: rights.value,
         attribution: attribution.value,
+        request_id: requestId(),
       });
       $("dialog").close();
       await refresh();
@@ -504,7 +926,7 @@ async function remove(id) {
   if (!deps.length)
     b.append(
       button("Remove", async () => {
-        await call("remove", { identity: id });
+        await call("remove", { identity: id, request_id: requestId() });
         $("dialog").close();
         await refresh();
         drawLibrary();
@@ -565,6 +987,7 @@ function drawLibrary() {
       const result = await call("duplicate-pack", {
         pack_id: p.id,
         name: p.name + " copy",
+        request_id: requestId(),
       });
       packId = result.id;
       await refresh();
@@ -632,7 +1055,7 @@ function drawLibrary() {
               revision_id: revisionId,
               text: "Adopt this identity version, preserving the explanation, timing and unrelated choices.",
               identity_version: v.id,
-              request_id: crypto.randomUUID().replaceAll("-", ""),
+              request_id: requestId(),
             });
             $("dialog").close();
             notice(
@@ -686,6 +1109,7 @@ function editPack(p, v) {
         asset_ids: choices.filter(([c]) => c.checked).map(([, id]) => id),
         pack_id: p?.id || null,
         prerequisites: v?.prerequisites || [],
+        request_id: requestId(),
       });
       packId = result.id;
       packVersionId = result.current_version;
@@ -707,6 +1131,7 @@ async function chooseFile(accept) {
   });
 }
 async function upload(file, params) {
+  if (transport?.upload) return transport.upload(file, params);
   const r = await fetch(
     "/upload?" + new URLSearchParams({ name: file.name, ...params }),
     { method: "POST", body: file },
@@ -773,6 +1198,7 @@ $("importPack").onclick = guarded(async () => {
     );
 });
 async function saveURL(url, name) {
+  if (transport?.save) return transport.save(url, name);
   if (window.showSaveFilePicker) {
     const handle = await window.showSaveFilePicker({ suggestedName: name });
     const response = await fetch(url);
@@ -796,7 +1222,11 @@ async function exportPack(v) {
   b.append(
     E("p", "Identity pack · guidance, eligible assets and declared omissions."),
   );
-  const result = await api("/prepare", { kind: "pack", id: v.id });
+  const result = await api("/prepare", {
+    kind: "pack",
+    id: v.id,
+    request_id: requestId(),
+  });
   b.append(
     E("h3", "Included"),
     E(
@@ -849,6 +1279,7 @@ function drawDelivery() {
       old,
     );
   }
+  releaseMediaWithin($("outputs"));
   $("outputs").replaceChildren();
   state.outputs
     .filter((a) => a.revision_id === revisionId)
@@ -862,11 +1293,13 @@ function drawDelivery() {
           `${a.profile === "overlay" ? "Overlay only" : a.profile === "video" ? "Video" : "Animation"} · ${a.format || "mp4"} · ${a.duration?.toFixed(2) || "?"}s`,
         ),
       );
-      if (a.format !== "mov") {
+      if (a.integrity !== "intact")
+        c.append(E("p", "Output missing or changed.", "empty"));
+      else if (a.format !== "mov") {
         const v = E("video");
         v.controls = true;
         v.preload = "metadata";
-        v.src = "/media/" + a.id;
+        setSource(v, "/media/" + a.id);
         c.append(v);
       } else
         c.append(
@@ -893,7 +1326,11 @@ function drawDelivery() {
                 "Output, separate audio assets and timing manifest. Reference footage is excluded from an overlay handoff.",
               ),
             );
-            const result = await api("/prepare", { kind: "handoff", id: a.id });
+            const result = await api("/prepare", {
+              kind: "handoff",
+              id: a.id,
+              request_id: requestId(),
+            });
             b.append(
               button("Save", async () => {
                 await saveURL("/download/" + result.id, "Unfold handoff.zip");
@@ -905,6 +1342,7 @@ function drawDelivery() {
       c.append(row);
       $("outputs").append(c);
     });
+  deliverySignature = deliveryStateSignature();
 }
 async function render(mode) {
   if (!revisionId) throw Error("Select a revision first.");
@@ -931,8 +1369,13 @@ async function render(mode) {
       cues: $("cueText").value
         ? [{ at: Number($("scrub").value), text: $("cueText").value }]
         : [],
+      request_id: requestId(),
     });
-    const a = await call("render-delivery", { delivery_id: d.id, mode });
+    const a = await call("render-delivery", {
+      delivery_id: d.id,
+      mode,
+      request_id: requestId(),
+    });
     notice("Output ready · " + a.id.slice(0, 8));
     await refresh();
     drawDelivery();
@@ -942,19 +1385,80 @@ async function render(mode) {
 }
 $("renderVideo").onclick = guarded(() => render("video"));
 $("renderOverlay").onclick = guarded(() => render("overlay"));
+function recoverPendingIntents() {
+  const comments = (state.feedback_intents || []).filter(
+    (intent) =>
+      ["pending", "completed"].includes(intent.status) &&
+      !intent.acknowledged_at &&
+      !acknowledgedIntents.has(intent.request_id || intent.id) &&
+      intent.payload?.revision_id === revisionId,
+  );
+  if (!commentPayload && comments.length === 1) {
+    commentPayload = {
+      ...comments[0].payload,
+      request_id: comments[0].request_id || comments[0].id,
+    };
+    commentPending = true;
+    $("draftStatus").textContent = "Pending comment retained · retry Comment";
+  }
+  const refinements = (state.refinement_intents || []).filter(
+    (intent) =>
+      ["pending", "accepted"].includes(intent.status) &&
+      !intent.acknowledged_at &&
+      !acknowledgedIntents.has(intent.request_id) &&
+      intent.payload?.revision_id === revisionId,
+  );
+  if (!submissionPayload && refinements.length === 1) {
+    submissionId = refinements[0].request_id;
+    submissionPayload = { ...refinements[0].payload, request_id: submissionId };
+    $("draftStatus").textContent =
+      refinements[0].status === "accepted"
+        ? "Apply accepted · retry checks its retained job"
+        : "Pending Apply retained · retry Apply";
+  }
+}
 async function refresh() {
   const next = await api("/state"),
     first = !state;
+  if (destroyed) return;
   state = next;
+  transport?.onState?.(state);
+  const shared = state.views?.find((view) =>
+    state.revisions.some((revision) => revision.id === view.revision_id),
+  );
   if (!projectId) {
-    const retained = localStorage.getItem("unfold.revision");
-    revisionId = state.revisions.some((r) => r.id === retained)
-      ? retained
-      : state.projects.find((p) => p.current_revision)?.current_revision;
+    const retained = remembered("unfold.revision");
+    revisionId = state.revisions.some((r) => r.id === shared?.revision_id)
+      ? shared.revision_id
+      : state.revisions.some((r) => r.id === retained)
+        ? retained
+        : state.projects.find((p) => p.current_revision)?.current_revision;
     projectId =
       state.revisions.find((r) => r.id === revisionId)?.project_id ||
       state.projects[0]?.id;
     compareId = project()?.revisions.at(-2) || revisionId;
+    viewVersion = shared?.version || 0;
+    if (shared?.theme) {
+      window.unfoldTheme?.(shared.theme);
+      drawTheme();
+    }
+    setPlaybackIntent(shared);
+  } else if (shared && shared.version > viewVersion && !draftDirty) {
+    const changesSelection =
+      revisionId !== shared.revision_id || projectId !== shared.project_id;
+    if (changesSelection) {
+      selectionGeneration++;
+      revisionId = shared.revision_id;
+      projectId = shared.project_id;
+      compareId = project()?.revisions.at(-2) || revisionId;
+      loadedDraft = null;
+    }
+    viewVersion = shared.version;
+    if (shared.theme) {
+      window.unfoldTheme?.(shared.theme);
+      drawTheme();
+    }
+    setPlaybackIntent(shared);
   }
   fill($("project"), state.projects, projectId);
   $("title").textContent = project()?.name || "No projects yet";
@@ -972,22 +1476,69 @@ async function refresh() {
     drawLibrary();
     drawDelivery();
   } else {
-    document.querySelectorAll("#players select").forEach((s) => {
-      const old = s.value;
-      fill(
-        s,
-        revisions().map((r) => ({ id: r.id, name: revisionName(r) })),
-        old,
-      );
-    });
-    drawStatus();
+    if (playerSignature !== playerStateSignature()) drawPlayers();
+    else {
+      loadDraft();
+      const nextStatus = signature({
+        projectId,
+        revisionId,
+        authority: state.authorities.find((a) => a.project_id === projectId),
+        jobs: state.jobs.filter((job) => job.project_id === projectId),
+        events: state.events.filter(
+          (event) => event.subject === projectId || event.data?.project_id === projectId,
+        ),
+      });
+      if (statusSignature !== nextStatus) drawStatus();
+    }
+    if (
+      !$("delivery").hidden &&
+      deliverySignature !== deliveryStateSignature()
+    )
+      drawDelivery();
+    if (!$("library").hidden) drawLibrary();
   }
+  recoverPendingIntents();
 }
 refresh().catch((e) => notice(e.message));
-setInterval(
+pollTimer = setInterval(
   () => refresh().catch((e) => notice("Disconnected: " + e.message)),
   3000,
 );
+window.unfoldOnToolResult = guarded(async (result) => {
+  const target = result?.kind === "revision" ? result.id : result?.revision_id;
+  if (!target || !state?.revisions.some((revision) => revision.id === target)) {
+    await refresh();
+    return;
+  }
+  if (target !== revisionId) await chooseRevision(target);
+});
+window.unfoldInvalidateMedia = (path) => {
+  document.querySelectorAll(`[data-unfold-source="${CSS.escape(path)}"]`).forEach((element) => {
+    if (element instanceof HTMLMediaElement) element.pause();
+    releaseElementMedia(element);
+    element.removeAttribute("src");
+    element.load?.();
+  });
+  if (path.startsWith("/media/")) {
+    if (playerSignature !== playerStateSignature()) drawPlayers();
+    if (!$("delivery").hidden && deliverySignature !== deliveryStateSignature())
+      drawDelivery();
+  }
+};
+window.unfoldTeardown = async () => {
+  destroyed = true;
+  clearTimeout(draftTimer);
+  clearTimeout(viewTimer);
+  clearInterval(pollTimer);
+  try {
+    // The host keeps the bridge open until teardown resolves. Flush typing
+    // that has not reached the debounce timer without submitting model work.
+    if (draftDirty) await saveDraft();
+    if (revisionId) await saveReviewView(true);
+  } finally {
+    releaseMediaWithin(document);
+  }
+};
 
 function drawTheme() {
   const mode = document.documentElement.dataset.theme || "system";
@@ -1017,6 +1568,7 @@ function drawTheme() {
   $("theme").onclick = () => {
     window.unfoldTheme(next, true);
     drawTheme();
+    guarded(saveReviewView)();
   };
 }
 drawTheme();
