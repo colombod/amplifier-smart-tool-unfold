@@ -1,6 +1,6 @@
 """Validated public inputs and the bounded HyperFrames authoring vocabulary."""
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -46,6 +46,18 @@ class Grant(Strict):
     max_response_tokens: int = Field(default=12000, ge=1000, le=20000)
 
 
+Angle = Annotated[float, Field(ge=-3600, le=3600)]
+
+
+class Orbit(Strict):
+    """Local circular track with independently animated vertex angles."""
+
+    center: tuple[float, float]
+    radius: float = Field(gt=0, le=640)
+    angles: list[Angle] = Field(min_length=3, max_length=80)
+    marker_radius: float = Field(default=0, ge=0, le=20)
+
+
 class Element(Strict):
     id: str = Field(pattern=r"^[a-z][a-z0-9_]{0,39}$")
     kind: Literal["card", "text", "line", "dot", "path", "circle", "arc", "image"]
@@ -63,6 +75,7 @@ class Element(Strict):
     opacity: float = Field(default=0, ge=0, le=1)
     radius: int = Field(default=14, ge=0, le=100)
     points: list[tuple[float, float]] = Field(default_factory=list, max_length=80)
+    orbit: Orbit | None = None
     closed: bool = False
     arrow_end: bool = False
     stroke_width: float = Field(default=4, ge=0.5, le=20)
@@ -78,7 +91,15 @@ class Element(Strict):
             raise ValueError("A synchronized glowing tip currently requires an arc.")
         if self.x + self.width > 1280 or self.y + self.height > 720:
             raise ValueError("Element must fit the 1280 × 720 canvas.")
-        if self.kind == "path":
+        if self.orbit:
+            if self.kind != "path" or not self.closed or self.points or self.arrow_end:
+                raise ValueError("Orbit requires a closed path without points or arrowheads.")
+            cx, cy = self.orbit.center
+            extent = self.orbit.radius + max(self.orbit.marker_radius, self.stroke_width / 2)
+            if not (extent <= cx <= self.width - extent and
+                    extent <= cy <= self.height - extent):
+                raise ValueError("Orbit and markers must fit inside the element bounds.")
+        elif self.kind == "path":
             if len(self.points) < (3 if self.closed else 2):
                 raise ValueError("Paths need two points; closed polygons need three.")
             if any(not (0 <= x <= self.width and 0 <= y <= self.height) for x, y in self.points):
@@ -92,6 +113,8 @@ class Element(Strict):
 
 class Tween(Strict):
     target: str
+    orbit_angles: list[Angle] | None = Field(default=None, min_length=3, max_length=80)
+    marker_opacity: float | None = Field(default=None, ge=0, le=1)
     at: float = Field(ge=0, le=60)
     duration: float = Field(default=0.5, ge=0, le=10)
     opacity: float | None = Field(default=None, ge=0, le=1)
@@ -146,8 +169,8 @@ class Scene(Strict):
                 raise ValueError("Drawing progress applies only to paths and circles.")
             if tween.points is not None:
                 element = next(e for e in self.elements if e.id == tween.target)
-                if element.kind != "path":
-                    raise ValueError("A points tween can only target a path.")
+                if element.kind != "path" or element.orbit is not None:
+                    raise ValueError("A points tween can only target a path with explicit points, not an orbit.")
                 if len(tween.points) != len(element.points):
                     raise ValueError(
                         "A points tween needs exactly as many points as the element."
@@ -169,6 +192,18 @@ class Scene(Strict):
                     raise ValueError(
                         "Points tweens on the same path must not overlap in time."
                     )
+        orbit_ends = {}
+        for tween in sorted(self.tweens, key=lambda t: t.at):
+            element = next(e for e in self.elements if e.id == tween.target)
+            if tween.orbit_angles is not None or tween.marker_opacity is not None:
+                if element.orbit is None:
+                    raise ValueError("Orbit animation requires an orbit path target.")
+            if tween.orbit_angles is not None:
+                if len(tween.orbit_angles) != len(element.orbit.angles):
+                    raise ValueError("Orbit animation must preserve vertex count.")
+                if tween.at < orbit_ends.get(tween.target, 0):
+                    raise ValueError("Orbit angle tweens must not overlap.")
+                orbit_ends[tween.target] = tween.at + tween.duration
         end = 0
         for move in self.camera:
             if move.at < end or move.at + move.duration > self.duration:

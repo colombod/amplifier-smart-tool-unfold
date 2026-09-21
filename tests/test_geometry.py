@@ -301,3 +301,112 @@ def test_points_tween_morphs_a_path_outline_in_place(tmp_path):
     assert not lit(before, 260, 260)
     assert not lit(midpoint, 260, 260)
     assert lit(after, 260, 260)
+
+
+def orbital(**kwargs):
+    return Element(id="orbit", kind="path", x=300, y=100, width=440, height=440,
+                   closed=True, opacity=1, color="#ffffff",
+                   orbit=dict(center=[220,220], radius=180, angles=[0,80,190,270],
+                              marker_radius=5), **kwargs)
+
+
+def test_orbit_validation_and_static_geometry():
+    e = orbital()
+    assert geometry(e).count('class="orbit-marker"') == 4
+    for update in [dict(points=[(0,0),(10,10),(0,10)]), dict(closed=False),
+                   dict(kind="circle"), dict(orbit=dict(center=[20,20],radius=180,
+                                                      angles=[0,90,180]))]:
+        with pytest.raises(ValueError):
+            Element.model_validate({**e.model_dump(), **update})
+    for tweens in [[dict(target="orbit", at=0, orbit_angles=[0,90,180])],
+                   [dict(target="orbit", at=0, duration=2, orbit_angles=[0,90,180,270]),
+                    dict(target="orbit", at=1, duration=2, orbit_angles=[45,135,225,315])]]:
+        with pytest.raises(ValueError):
+            Scene(title="Invalid", duration=5, explanation="Invalid orbit",
+                  elements=[e], tweens=tweens)
+    with pytest.raises(ValueError, match="orbit path"):
+        Scene(title="Invalid", duration=5, explanation="Invalid target", elements=[vector()],
+              tweens=[dict(target="v", at=0, orbit_angles=[0,90,180])])
+
+
+@pytest.mark.skipif(not os.environ.get("UNFOLD_TEST_BACKEND"), reason="Needs renderer")
+def test_encoded_independent_orbit_corners_and_outline(tmp_path):
+    import math
+    backend = Backend(os.environ["UNFOLD_TEST_BACKEND"])
+    scene = Scene(title="Orbit test", duration=5, background="#000000",
+                  explanation="Independent corners follow arcs, outline follows corners",
+                  elements=[orbital()], stroke_animation="svg",
+                  tweens=[dict(target="orbit", at=0, duration=4,
+                               orbit_angles=[90,130,240,350], ease="none"),
+                          dict(target="orbit", at=4, duration=1, marker_opacity=0)])
+    source = tmp_path / "source"
+    backend.author(scene, source)
+    backend.render(source, tmp_path / "orbit.mp4")
+    frames = backend.frames(tmp_path / "orbit.mp4", [1,2,3], tmp_path / "frames")
+    for t, f in zip([1,2,3], frames):
+        image = Image.open(f['path']).convert('RGB')
+        pts = []
+        for start, end in zip([0,80,190,270], [90,130,240,350]):
+            angle = math.radians(start+(end-start)*t/4)
+            x,y = 520+180*math.cos(angle),320+180*math.sin(angle)
+            pts.append((x,y))
+            # Radius and marker location at intermediate time, not endpoint-only checks.
+            assert max(sum(image.getpixel((round(x)+dx,round(y)+dy)))
+                       for dx in range(-2,3) for dy in range(-2,3)) > 600
+        # Connected segment midpoints are rendered too.
+        for a,b in zip(pts,pts[1:]+pts[:1]):
+            x,y = round((a[0]+b[0])/2),round((a[1]+b[1])/2)
+            assert max(sum(image.getpixel((x+dx,y+dy)))
+                       for dx in range(-2,3) for dy in range(-2,3)) > 450
+    # Re-open stored source: orbit data survives the same model validation as retained work.
+    import json
+    assert Scene.model_validate(json.loads((source/'scene.json').read_text())) == scene
+
+
+def test_points_tween_rejects_orbit_and_nonfinite_coordinates():
+    with pytest.raises(ValueError, match="not an orbit"):
+        Scene(title="Invalid", duration=5, explanation="Orbit owns geometry",
+              elements=[orbital()], tweens=[dict(target="orbit", at=0, points=[])])
+    for value in (float("nan"), float("inf"), -float("inf")):
+        with pytest.raises(ValueError, match="finite number"):
+            Scene(title="Invalid", duration=5, explanation="Finite geometry",
+                  elements=[_morphable()], tweens=[dict(target="p", at=0,
+                      points=[(value, 10), (50, 50), (100, 100)])])
+
+
+@pytest.mark.skipif(not os.environ.get("UNFOLD_TEST_BACKEND"), reason="Needs renderer")
+def test_successive_points_tweens_seek_and_continue_from_previous_shape(tmp_path):
+    import json
+    import subprocess
+
+    backend = Backend(os.environ["UNFOLD_TEST_BACKEND"])
+    scene = Scene(title="Successive morphs", duration=5, explanation="Continuous geometry",
+                  elements=[_morphable()], tweens=[
+                      dict(target="p", at=3, duration=1, ease="none",
+                           points=[(90, 10), (130, 50), (180, 100)]),
+                      dict(target="p", at=1, duration=1, ease="none",
+                           points=[(50, 10), (90, 50), (140, 100)])])
+    source = tmp_path / "source"
+    backend.author(scene, source)
+    script = (source / "index.html").read_text().split("<script>")[-1].split("</script>")[0]
+    # Exercise the actual generated timeline and GSAP with a minimal SVG sink.
+    # Independent expectations cover unsorted input, holds, and backward/random seek.
+    harness = r'''
+const assert = require('node:assert/strict');
+const gsap = require(process.argv[1]).gsap;
+{
+const window = {};
+let outline = 'M 10 10 L 50 50 L 100 100';
+const document = {querySelector: () => ({setAttribute: (_, value) => {outline = value;}})};
+eval(process.argv[2]);
+for (const [time, x] of [[0.5,10],[1.5,30],[2.5,50],[3.5,70],[4.5,90],
+                         [1.5,30],[0,10],[4,90],[2.5,50],[3,50]]) {
+    window.__timelines.unfold.seek(time, false);
+    assert.equal(Number(outline.split(' ')[1]), x);
+}
+}
+gsap.ticker.sleep();
+'''
+    subprocess.run(["node", "-e", harness, str(source / "gsap.min.js"), script],
+                   check=True, text=True, timeout=30)
+    assert Scene.model_validate(json.loads((source / "scene.json").read_text())) == scene

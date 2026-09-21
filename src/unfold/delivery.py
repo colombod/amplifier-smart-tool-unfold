@@ -37,8 +37,29 @@ def media_info(path):
 
 class Delivery:
     def configure_delivery(
-        self, revision_id, reference_id=None, reference_start=0, audio=None, cues=None
+        self,
+        revision_id,
+        reference_id=None,
+        reference_start=0,
+        audio=None,
+        cues=None,
+        request_id=None,
     ):
+        if request_id is not None:
+            return self._mutation(
+                "configure_delivery",
+                request_id,
+                {
+                    "revision_id": revision_id,
+                    "reference_id": reference_id,
+                    "reference_start": reference_start,
+                    "audio": audio or [],
+                    "cues": cues or [],
+                },
+                lambda: self.configure_delivery(
+                    revision_id, reference_id, reference_start, audio, cues
+                ),
+            )
         rev = self.store.get(revision_id, "revision")
         duration = rev["brief"]["duration"]
         if not math.isfinite(reference_start) or reference_start < 0:
@@ -117,7 +138,14 @@ class Delivery:
         self.store.event("delivery_configured", revision_id, {"delivery_id": record["id"]})
         return record
 
-    def render_delivery(self, delivery_id, mode="video"):
+    def render_delivery(self, delivery_id, mode="video", request_id=None):
+        if request_id is not None:
+            return self._mutation(
+                "render_delivery",
+                request_id,
+                {"delivery_id": delivery_id, "mode": mode},
+                lambda: self.render_delivery(delivery_id, mode),
+            )
         if mode not in ("video", "overlay"):
             raise UnfoldError("INVALID_INPUT", "Choose video or overlay.")
         d = self.store.get(delivery_id, "delivery")
@@ -222,7 +250,14 @@ class Delivery:
         )
         return self.artifact(artifact["id"])
 
-    def export_handoff(self, artifact_id, destination):
+    def export_handoff(self, artifact_id, destination, request_id=None):
+        if request_id is not None:
+            return self._mutation(
+                "export_handoff",
+                request_id,
+                {"artifact_id": artifact_id, "destination": str(destination)},
+                lambda: self.export_handoff(artifact_id, destination),
+            )
         a = self.artifact(artifact_id)
         if a["integrity"] != "intact":
             raise UnfoldError("MATERIAL_CHANGED", "Output changed or missing.")

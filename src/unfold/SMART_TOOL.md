@@ -11,6 +11,8 @@ use_cases:
   - Review, rename and export saved outputs without a model
 platforms:
   - macos
+  - linux
+  - windows
 requires:
   - name: Node.js, HyperFrames 0.8.33 and GSAP 3.14.2
     purpose: Render existing compositions; not needed for help or retained-state reads.
@@ -26,13 +28,17 @@ requires:
 The Python library is the product. The CLI and optional loopback dashboard adapt
 the same operations. Compositions are 1280×720 at 30 fps, lasting 5–60 seconds.
 The authoring profile supports text, cards, paths, polygons, circles, arcs, image
-assets, stroke drawing and camera motion. An embedded Amplifier Agent creates and
+assets, stroke drawing, equal-point-count path morphing and camera motion. An embedded Amplifier Agent creates and
 refines compositions; deterministic operations manage assets, packs and delivery.
 
 Studio review includes full-width Single, synchronized Compare, retained drafts,
 bounded direct refinement, cancellation and observable outcomes. Identity ZIPs carry
 guidance and eligible assets. Delivery supports silent transparent ProRes 4444 MOV
 and H.264 MP4 with optional reference footage and imported audio.
+
+Closed polygon paths can animate individual corner angles on a circular track,
+with attached corner markers. This supports irregular shapes resolving into
+regular polygons without corners leaving the track.
 
 This is not the entire draft vision. Arbitrary HTML/CSS, custom-font rendering,
 external source-edit adoption, editable project ZIP round trips, transcription,
@@ -170,6 +176,8 @@ are readable from another process. Supply a 32-character lowercase hexadecimal
 return the prior state, including running/failed states, without spending again.
 Different input with the same ID fails. After caller/process loss a record may remain
 running; this means uncertain interruption, not permission to retry automatically.
+Worker status checks do not send signals. Cleanup stops the owned worker tree;
+recovery checks the exact worker command and request path before stopping it.
 Direct synchronous calls need a live supervisor for cancellation. Dashboard jobs
 reconcile completed or interrupted supervisors on `review_state`; they never restart
 spending automatically. A new creative attempt requires a new request identity.
